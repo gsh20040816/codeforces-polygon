@@ -6,6 +6,26 @@
 
 - 暂无未发布变更。
 
+## [0.13.0] - 2026-06-09
+
+### Added
+
+- 新增 `delete_problem_test()`，支持通过 MCP 删除已有测试点，便于清理过多手工测试。
+
+### Changed
+
+- `save_problem_file.source_type` 改为 Polygon 原始 `sourceType` 字符串，不再误用 validator/checker/main 角色枚举；角色绑定仍由 `set_problem_validator`、`set_problem_checker` 和 `set_problem_interactor` 负责。
+- `prepare_problem_release()` 改为按 Polygon 要求先提交工作副本再构建，避免未提交修改时直接打包失败。
+- `build_problem_package_and_wait()` 在 package 失败时把 `package.comment` 提升为 `failure_reason` 和 `error`，避免把构建请求 OK 误读为包构建成功。
+- `view_problem_test_input()` 在生成测试或 validator 崩溃时返回结构化错误信息，并尽量附带 Polygon 返回的部分输入内容。
+
+### Fixed
+
+- 修复 `commit_problem_changes(message=...)` 因统一返回 envelope 字段冲突而在提交已生效后仍报错的问题。
+- `set_problem_validator`、`set_problem_checker`、`set_problem_interactor` 在设置接口异常后会读回当前绑定；若远端已生效，则返回成功并保留 warning。
+- `check_problem_readiness()` 不再因为 Polygon 返回真实编译器 `sourceType`（如 `cpp.g++17`）而把题目文件检查误判为 blocking issue。
+- 下载类工具的账号密码缺失错误现在明确说明该流程不能复用 API key/secret。
+
 ## [0.12.1] - 2026-03-07
 
 ### Added

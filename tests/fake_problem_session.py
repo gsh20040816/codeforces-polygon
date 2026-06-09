@@ -234,6 +234,10 @@ class FakeProblemSession:
         self._record("build_package", full=full, verify=verify)
         return _resolve(self._build_package_result)
 
+    def delete_test(self, *, testset: str, test_index: int) -> Any:
+        self._record("delete_test", testset=testset, test_index=test_index)
+        return {"status": "OK"}
+
 
 def make_problem(
     *,
@@ -313,7 +317,7 @@ def make_solution(name: str, tag: SolutionTag) -> Solution:
 def make_file(
     name: str,
     *,
-    source_type: Optional[SourceType] = SourceType.MAIN,
+    source_type: Optional[str] = "main",
 ) -> File:
     return File(
         name=name,

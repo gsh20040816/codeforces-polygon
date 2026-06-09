@@ -1,6 +1,6 @@
 from typing import Optional
 
-from src.polygon.models import AccessType, File, FileType, ProblemFiles, SourceType
+from src.polygon.models import AccessType, File, FileType, ProblemFiles
 from src.polygon.utils.problem_utils import check_write_access, make_problem_request
 
 
@@ -93,7 +93,7 @@ def save_problem_file(
     name: str,
     file_content: str,
     pin: Optional[str] = None,
-    source_type: Optional[SourceType] = None,
+    source_type: Optional[str] = None,
     for_types: Optional[str] = None,
     stages: Optional[list[str]] = None,
     assets: Optional[list[str]] = None,
@@ -110,7 +110,7 @@ def save_problem_file(
     if check_existing is not None:
         params["checkExisting"] = _bool_to_api(check_existing)
     if source_type is not None:
-        params["sourceType"] = source_type.value
+        params["sourceType"] = source_type
 
     has_resource_props = any(value is not None for value in (for_types, stages, assets))
     if file_type == FileType.RESOURCE:

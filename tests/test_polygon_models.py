@@ -33,7 +33,7 @@ class PolygonModelsTest(unittest.TestCase):
                         "name": "validator.cpp",
                         "modificationTimeSeconds": 1700000001,
                         "length": 456,
-                        "sourceType": "validator",
+                        "sourceType": "cpp.gcc14-64-msys2-g++23",
                     }
                 ],
                 "auxFiles": [],
@@ -43,7 +43,7 @@ class PolygonModelsTest(unittest.TestCase):
         self.assertEqual(files.resourceFiles[0].resourceAdvancedProperties.forTypes, "cpp.g++17")
         self.assertEqual(files.resourceFiles[0].resourceAdvancedProperties.stages, [ResourceStage.COMPILE])
         self.assertEqual(files.resourceFiles[0].resourceAdvancedProperties.assets, [ResourceAsset.VALIDATOR])
-        self.assertEqual(files.sourceFiles[0].sourceType.value, "validator")
+        self.assertEqual(files.sourceFiles[0].sourceType, "cpp.gcc14-64-msys2-g++23")
 
     def test_package_from_dict_parses_state_and_type(self):
         package = Package.from_dict(

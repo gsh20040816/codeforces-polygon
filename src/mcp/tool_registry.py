@@ -57,6 +57,7 @@ from src.mcp.utils.problem_sources import (
 )
 from src.mcp.utils.problem_statements import get_problem_statements
 from src.mcp.utils.problem_tests_extended import (
+    delete_problem_test,
     enable_problem_groups,
     enable_problem_points,
     get_problem_checker_tests,
@@ -133,7 +134,7 @@ _COMMON_PARAM_NOTES: dict[str, str] = {
     "show_deleted": "是否包含已删除题目。",
     "solution_name": "解法文件名。",
     "source": "测试脚本源码文本。",
-    "source_type": "源文件类型。",
+    "source_type": "Polygon 原始 sourceType 字符串。对 source 文件通常是编译器/源文件类型，例如 cpp.gcc14-64-msys2-g++23。",
     "stages": "resource 文件的生效阶段列表。",
     "tag": "解法标签。",
     "tags": "题目标签列表。",
@@ -164,7 +165,6 @@ _PARAM_ALLOWED_VALUES: dict[str, tuple[str, ...]] = {
     "file_type": ("resource", "source", "aux"),
     "package_type": ("standard", "linux", "windows"),
     "points_policy": ("COMPLETE_GROUP", "EACH_TEST"),
-    "source_type": ("solution", "validator", "checker", "interactor", "main"),
     "stages": ("COMPILE", "RUN"),
     "tag": ("MA", "OK", "RJ", "TL", "TO", "WA", "PE", "ML", "RE"),
 }
@@ -219,7 +219,13 @@ _TOOL_PRECONDITION_OVERRIDES: dict[str, tuple[str, ...]] = {
     "download_problem_package": ("package_id 必须对应题目已有的历史包。",),
     "build_problem_package_and_wait": ("适合 agent/workflow 编排场景；失败时优先阅读 recovery_actions。",),
     "prepare_problem_release": (
-        "会依次执行工作副本更新、readiness、构建和提交，属于真正的发布编排操作。",
+        "会依次执行工作副本更新、readiness、提交和构建，属于真正的发布编排操作。",
+    ),
+    "save_problem_file": (
+        "source_type 是 Polygon 原始编译器/sourceType 字符串；validator/checker 角色请用 set_problem_validator/set_problem_checker 绑定。",
+    ),
+    "save_problem_script": (
+        "非空脚本行必须显式写输出目标，例如 `gen 1 > 3` 或 `gen 1 >$`。",
     ),
 }
 
@@ -229,6 +235,9 @@ _TOOL_RETURN_OVERRIDES: dict[str, tuple[str, ...]] = {
     "download_problem_descriptor": ("原始 bytes。失败时直接抛异常。",),
     "download_contest_descriptor": ("原始 bytes。失败时直接抛异常。",),
     "download_contest_statements_pdf": ("原始 bytes。失败时直接抛异常。",),
+    "view_problem_test_input": (
+        "成功时返回原始 bytes；生成或 validator 失败时返回包含 failure_comment/partial_input 的结构化错误对象。",
+    ),
 }
 
 
@@ -285,6 +294,7 @@ TOOL_REGISTRY: tuple[ToolRegistration, ...] = (
     ToolRegistration("write", save_problem_file),
     ToolRegistration("write", save_problem_script),
     ToolRegistration("write", save_problem_test),
+    ToolRegistration("write", delete_problem_test),
     ToolRegistration("write", save_problem_validator_test),
     ToolRegistration("write", save_problem_checker_test),
     ToolRegistration("write", save_problem_test_group),

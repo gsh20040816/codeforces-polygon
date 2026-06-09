@@ -31,7 +31,11 @@ class FileType(str, Enum):
 
 
 class SourceType(str, Enum):
-    """源文件类型"""
+    """解法角色类型。
+
+    Polygon 的 problem.saveFile 接口中 sourceType 实际表示编译器/源文件类型
+    字符串，例如 cpp.gcc14-64-msys2-g++23；不要用这个枚举解析题目文件列表。
+    """
 
     SOLUTION = "solution"
     VALIDATOR = "validator"
@@ -158,22 +162,20 @@ class File(BaseModel):
         name: 文件名
         modificationTimeSeconds: 文件修改时间（Unix时间戳）
         length: 文件长度（字节）
-        sourceType: 源文件类型（仅对源文件有效）
+        sourceType: Polygon 原始 sourceType 字符串（仅对源文件有效）
         resourceAdvancedProperties: 资源文件的高级属性（可选）
     """
 
     name: str
     modificationTimeSeconds: datetime
     length: int
-    sourceType: Optional[SourceType] = None
+    sourceType: Optional[str] = None
     resourceAdvancedProperties: Optional[ResourceAdvancedProperties] = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "File":
         parsed = dict(data)
         parsed["modificationTimeSeconds"] = _to_datetime(parsed.get("modificationTimeSeconds"))
-        if parsed.get("sourceType") is not None:
-            parsed["sourceType"] = SourceType(parsed["sourceType"])
         if parsed.get("resourceAdvancedProperties"):
             parsed["resourceAdvancedProperties"] = ResourceAdvancedProperties.from_dict(
                 parsed["resourceAdvancedProperties"]

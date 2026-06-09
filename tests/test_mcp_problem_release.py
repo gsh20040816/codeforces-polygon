@@ -215,13 +215,20 @@ class MpcProblemReleaseTest(unittest.TestCase):
     @patch("src.mcp.utils.problem_release.build_problem_package_and_wait")
     @patch("src.mcp.utils.problem_release.check_problem_readiness")
     @patch("src.mcp.utils.problem_release.get_problem_session")
-    def test_prepare_problem_release_does_not_commit_after_build_failure(
+    def test_prepare_problem_release_reports_build_failure_after_commit(
         self,
         session_mock,
         readiness_mock,
         build_mock,
     ):
-        session = FakeProblemSession(update_working_copy_result={"status": "OK"})
+        session = FakeProblemSession(
+            problems_sequence=SequenceValue(
+                [make_problem(revision=1, latest_package=1, modified=True)],
+                [make_problem(revision=2, latest_package=1, modified=False)],
+            ),
+            update_working_copy_result={"status": "OK"},
+            commit_changes_result={"status": "OK"},
+        )
         session_mock.return_value = session
         readiness_mock.return_value = {
             "ready": True,
@@ -238,7 +245,9 @@ class MpcProblemReleaseTest(unittest.TestCase):
         self.assertEqual(result["decision"], "build_failed")
         self.assertEqual(result["can_retry"], True)
         self.assertEqual(result["recovery_actions"][0]["action"], "retry_build")
-        self.assertNotIn("commit_changes", session.calls)
+        self.assertEqual(session.calls["commit_changes"], [{"minor_changes": None, "message": None}])
+        self.assertEqual(result["commit_result"], {"status": "OK"})
+        self.assertEqual(result["post_commit_snapshot"]["revision"], 2)
 
     @patch("src.mcp.utils.problem_release.build_problem_package_and_wait")
     @patch("src.mcp.utils.problem_release.check_problem_readiness")

@@ -278,6 +278,34 @@ def save_problem_test(
     return _unwrap_result(response)
 
 
+def delete_problem_test(
+    api_key: str,
+    api_secret: str,
+    base_url: str,
+    problem_id: int,
+    access_type: AccessType,
+    testset: str,
+    test_index: int,
+    pin: Optional[str] = None,
+):
+    check_write_access(access_type)
+
+    response = make_problem_request(
+        api_key,
+        api_secret,
+        base_url,
+        "problem.deleteTest",
+        problem_id,
+        pin,
+        {
+            "testset": testset,
+            "testIndex": str(test_index),
+        },
+        http_method="POST",
+    )
+    return _unwrap_result(response)
+
+
 def set_problem_test_group(
     api_key: str,
     api_secret: str,

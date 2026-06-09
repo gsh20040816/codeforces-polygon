@@ -10,6 +10,7 @@ from src.polygon.api.problem_packages import build_problem_package, commit_probl
 from src.polygon.api.problem_save_statement import save_problem_statement
 from src.polygon.api.problem_sources import save_problem_solution
 from src.polygon.api.problem_tests_extended import (
+    delete_problem_test,
     enable_problem_groups,
     enable_problem_points,
     save_problem_test_group,
@@ -182,6 +183,24 @@ class PolygonApiExtensionsTest(unittest.TestCase):
         self.assertEqual(args[6]["assets"], "VALIDATOR;CHECKER")
         self.assertEqual(args[6]["checkExisting"], "true")
 
+    @patch("src.polygon.api.problem_content.make_problem_request", return_value={"status": "OK", "result": {"saved": True}})
+    def test_save_problem_file_passes_raw_source_type(self, request_mock):
+        result = save_problem_file(
+            "key",
+            "secret",
+            "https://polygon.codeforces.com/api/",
+            1,
+            AccessType.OWNER,
+            FileType.SOURCE,
+            "val.cpp",
+            "int main() {}",
+            source_type="cpp.gcc14-64-msys2-g++23",
+        )
+
+        self.assertEqual(result, {"saved": True})
+        args, _kwargs = request_mock.call_args
+        self.assertEqual(args[6]["sourceType"], "cpp.gcc14-64-msys2-g++23")
+
     @patch("src.polygon.api.problem_packages.make_problem_request", return_value={"status": "OK", "result": {"committed": True}})
     def test_commit_problem_changes_passes_optional_fields(self, request_mock):
         result = commit_problem_changes(
@@ -352,6 +371,28 @@ class PolygonApiExtensionsTest(unittest.TestCase):
         args, kwargs = request_mock.call_args
         self.assertEqual(args[3], "problem.setTestGroup")
         self.assertEqual(args[6]["testIndices"], "1,2")
+        self.assertEqual(kwargs["http_method"], "POST")
+
+    @patch(
+        "src.polygon.api.problem_tests_extended.make_problem_request",
+        return_value={"status": "OK", "result": {"deleted": True}},
+    )
+    def test_delete_problem_test_uses_post(self, request_mock):
+        result = delete_problem_test(
+            "key",
+            "secret",
+            "https://polygon.codeforces.com/api/",
+            1,
+            AccessType.OWNER,
+            testset="tests",
+            test_index=3,
+        )
+
+        self.assertEqual(result, {"deleted": True})
+        args, kwargs = request_mock.call_args
+        self.assertEqual(args[3], "problem.deleteTest")
+        self.assertEqual(args[6]["testset"], "tests")
+        self.assertEqual(args[6]["testIndex"], "3")
         self.assertEqual(kwargs["http_method"], "POST")
 
     @patch(

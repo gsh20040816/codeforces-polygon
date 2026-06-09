@@ -1,6 +1,7 @@
 from typing import Optional
 
 from src.mcp.utils.common import (
+    build_operation_result,
     get_problem_session,
     parse_enum,
     resolve_text_input,
@@ -16,13 +17,14 @@ def set_problem_validator(
     pin: Optional[str] = None,
 ):
     """设置题目的 validator 源文件。"""
-    return run_write_operation(
+    return _set_source_binding_with_readback(
         action="set_problem_validator",
-        success_message="题目 validator 已设置",
-        failure_message="题目 validator 设置失败",
-        operation=lambda: get_problem_session(problem_id, pin).set_validator(validator),
         problem_id=problem_id,
-        validator=validator,
+        pin=pin,
+        requested_name=validator,
+        setter_name="set_validator",
+        getter_name="get_validator",
+        label="validator",
     )
 
 
@@ -32,13 +34,14 @@ def set_problem_checker(
     pin: Optional[str] = None,
 ):
     """设置题目的 checker 源文件。"""
-    return run_write_operation(
+    return _set_source_binding_with_readback(
         action="set_problem_checker",
-        success_message="题目 checker 已设置",
-        failure_message="题目 checker 设置失败",
-        operation=lambda: get_problem_session(problem_id, pin).set_checker(checker),
         problem_id=problem_id,
-        checker=checker,
+        pin=pin,
+        requested_name=checker,
+        setter_name="set_checker",
+        getter_name="get_checker",
+        label="checker",
     )
 
 
@@ -48,13 +51,14 @@ def set_problem_interactor(
     pin: Optional[str] = None,
 ):
     """设置题目的 interactor 源文件。"""
-    return run_write_operation(
+    return _set_source_binding_with_readback(
         action="set_problem_interactor",
-        success_message="题目 interactor 已设置",
-        failure_message="题目 interactor 设置失败",
-        operation=lambda: get_problem_session(problem_id, pin).set_interactor(interactor),
         problem_id=problem_id,
-        interactor=interactor,
+        pin=pin,
+        requested_name=interactor,
+        setter_name="set_interactor",
+        getter_name="get_interactor",
+        label="interactor",
     )
 
 
@@ -148,6 +152,60 @@ def _save_problem_solution(
         source_type=source_type_enum,
         tag=tag_enum,
         check_existing=check_existing,
+    )
+
+
+def _set_source_binding_with_readback(
+    *,
+    action: str,
+    problem_id: int,
+    pin: Optional[str],
+    requested_name: str,
+    setter_name: str,
+    getter_name: str,
+    label: str,
+):
+    session = get_problem_session(problem_id, pin)
+    try:
+        result = getattr(session, setter_name)(requested_name)
+    except Exception as exc:
+        current_name = None
+        readback_error = None
+        try:
+            current_name = getattr(session, getter_name)()
+        except Exception as read_exc:
+            readback_error = read_exc
+
+        if current_name == requested_name:
+            return build_operation_result(
+                action=action,
+                success=True,
+                message=f"题目 {label} 已设置；设置接口返回异常，但读回状态已生效",
+                result={"readback": current_name},
+                problem_id=problem_id,
+                **{label: requested_name},
+                observed_binding=current_name,
+                operation_warning=str(exc),
+            )
+
+        return build_operation_result(
+            action=action,
+            success=False,
+            message=f"题目 {label} 设置失败",
+            error=exc,
+            problem_id=problem_id,
+            **{label: requested_name},
+            observed_binding=current_name,
+            readback_error=str(readback_error) if readback_error is not None else None,
+        )
+
+    return build_operation_result(
+        action=action,
+        success=True,
+        message=f"题目 {label} 已设置",
+        result=result,
+        problem_id=problem_id,
+        **{label: requested_name},
     )
 
 

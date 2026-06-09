@@ -8,6 +8,9 @@ from src.polygon.client import PolygonClient
 
 SENSITIVE_FIELD_NAMES = frozenset({"pin", "password", "api_secret", "apisig"})
 REDACTED_VALUE = "***"
+OPERATION_RESULT_FIXED_FIELDS = frozenset(
+    {"status", "action", "message", "result", "error", "error_type"}
+)
 
 def get_api_credentials() -> tuple[str, str]:
     """获取API凭证"""
@@ -35,7 +38,9 @@ def get_account_credentials(
 
     if not resolved_login or not resolved_password:
         raise ValueError(
-            "请提供 Polygon 账号密码，或设置环境变量 POLYGON_LOGIN 和 POLYGON_PASSWORD"
+            "该下载工具使用 Polygon 网页下载流程，需要 Polygon 账号密码；"
+            "请提供 login/password，或设置环境变量 POLYGON_LOGIN 和 POLYGON_PASSWORD。"
+            "API key/secret 只适用于 Polygon API 工具，不能替代网页下载凭据"
         )
 
     return resolved_login, resolved_password
@@ -176,6 +181,15 @@ def build_operation_result(
     return payload
 
 
+def sanitize_operation_context(context: dict[str, Any]) -> dict[str, Any]:
+    """重命名会和统一返回 envelope 冲突的上下文字段。"""
+    sanitized: dict[str, Any] = {}
+    for key, value in context.items():
+        output_key = f"context_{key}" if key in OPERATION_RESULT_FIXED_FIELDS else key
+        sanitized[output_key] = value
+    return sanitized
+
+
 def build_download_result(
     *,
     action: str,
@@ -224,7 +238,7 @@ def run_write_operation(
             success=False,
             message=failure_message,
             error=exc,
-            **context,
+            **sanitize_operation_context(context),
         )
 
     success = is_ok_result(result)
@@ -233,7 +247,7 @@ def run_write_operation(
         success=success,
         message=success_message if success else failure_message,
         result=result,
-        **context,
+        **sanitize_operation_context(context),
     )
 
 

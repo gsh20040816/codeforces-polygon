@@ -43,6 +43,7 @@ from .api.problem_tests_extended import (
     get_problem_validator_tests,
     save_problem_checker_test,
     save_problem_test,
+    delete_problem_test,
     save_problem_test_group,
     save_problem_validator_test,
     set_problem_test_group,
@@ -292,7 +293,7 @@ class ProblemSession:
         file_type: FileType,
         name: str,
         file_content: str,
-        source_type: Optional[SourceType] = None,
+        source_type: Optional[str] = None,
         for_types: Optional[str] = None,
         stages: Optional[list[str]] = None,
         assets: Optional[list[str]] = None,
@@ -402,6 +403,18 @@ class ProblemSession:
             test_output_for_statements,
             verify_input_output_for_statements,
             check_existing,
+        )
+
+    def delete_test(self, testset: str, test_index: int):
+        return delete_problem_test(
+            self.client.api_key,
+            self.client.api_secret,
+            self.client.base_url,
+            self.problem_id,
+            self._ensure_access_type(),
+            testset,
+            test_index,
+            self.pin,
         )
 
     def get_validator_tests(self) -> list[ValidatorTest]:

@@ -219,7 +219,7 @@ def build_problem_package_and_wait(
                         action="build_problem_package_and_wait",
                         success=True,
                         message="题目包已构建完成",
-                        result=build_result,
+                        result=serialized_package,
                         build_result=build_result,
                         package=serialized_package,
                         package_history=package_history,
@@ -238,12 +238,15 @@ def build_problem_package_and_wait(
                     response["package"] = serialized_package
                     return response
                 if matched_package.state == PackageState.FAILED:
+                    failure_reason = serialized_package.get("comment") or "Package failed"
                     response = build_operation_result(
                         action="build_problem_package_and_wait",
                         success=False,
                         message="题目包构建失败",
-                        result=build_result,
+                        result=serialized_package,
+                        error=RuntimeError(str(failure_reason)),
                         build_result=build_result,
+                        failure_reason=failure_reason,
                         package=serialized_package,
                         package_history=package_history,
                         polls=polls,

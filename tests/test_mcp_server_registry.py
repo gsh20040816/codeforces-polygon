@@ -88,7 +88,7 @@ class MpcServerRegistryTest(unittest.TestCase):
     def test_docstrings_include_value_hints_and_return_contracts(self):
         save_problem_file_doc = inspect.getdoc(save_problem_file)
         self.assertIn("可选值: resource, source, aux", save_problem_file_doc)
-        self.assertIn("可选值: solution, validator, checker, interactor, main", save_problem_file_doc)
+        self.assertIn("Polygon 原始编译器/sourceType 字符串", save_problem_file_doc)
 
         save_problem_test_group_doc = inspect.getdoc(save_problem_test_group)
         self.assertIn("可选值: COMPLETE_GROUP, EACH_TEST", save_problem_test_group_doc)

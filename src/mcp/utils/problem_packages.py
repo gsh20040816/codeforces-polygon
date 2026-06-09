@@ -98,5 +98,5 @@ def commit_problem_changes(
         ),
         problem_id=problem_id,
         minor_changes=minor_changes,
-        message=message,
+        commit_message=message,
     )

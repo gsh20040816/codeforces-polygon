@@ -14,7 +14,6 @@ from src.polygon.models import (
     ProblemFiles,
     ResourceAsset,
     ResourceStage,
-    SourceType,
 )
 
 
@@ -69,7 +68,13 @@ def save_problem_file(
     check_existing: Optional[bool] = None,
     local_path: Optional[str] = None,
 ):
-    """保存题目文件。"""
+    """
+    保存题目文件。
+
+    对 source 文件，source_type 是 Polygon 原始编译器/源文件类型字符串，
+    例如 cpp.gcc14-64-msys2-g++23；validator/checker/main 角色绑定请使用
+    set_problem_validator、set_problem_checker 或 set_problem_interactor。
+    """
     return run_write_operation(
         action="save_problem_file",
         success_message="题目文件已保存",
@@ -229,9 +234,6 @@ def _save_problem_file(
     file_type_enum = parse_enum(FileType, file_type, "file_type")
     resolved_name = resolve_upload_name(file_name, local_path, "file_name")
     resolved_content = resolve_text_input(file_content, local_path, "file_content")
-    source_type_enum = (
-        parse_enum(SourceType, source_type, "source_type") if source_type is not None else None
-    )
     stage_values = (
         [parse_enum(ResourceStage, stage, "stage").value for stage in stages]
         if stages is not None
@@ -247,7 +249,7 @@ def _save_problem_file(
         file_type=file_type_enum,
         name=resolved_name,
         file_content=resolved_content,
-        source_type=source_type_enum,
+        source_type=source_type,
         for_types=for_types,
         stages=stage_values,
         assets=asset_values,
@@ -264,7 +266,26 @@ def _save_problem_script(
     local_path: Optional[str],
 ):
     resolved_source = resolve_text_input(source, local_path, "source")
+    _validate_polygon_script(resolved_source)
     return get_problem_session(problem_id, pin).save_script(
         testset=testset,
         source=resolved_source,
     )
+
+
+def _validate_polygon_script(source: str) -> None:
+    for line_number, raw_line in enumerate(source.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ">" not in line:
+            raise ValueError(
+                f"测试脚本第 {line_number} 行缺少输出重定向，Polygon 要求形如 '<command> > testIndex' 或 '<command> >$'"
+            )
+        target = line.rsplit(">", maxsplit=1)[1].strip()
+        if not target:
+            raise ValueError(f"测试脚本第 {line_number} 行的重定向目标为空")
+        if target != "$" and not target.isdigit():
+            raise ValueError(
+                f"测试脚本第 {line_number} 行的重定向目标必须是正整数测试编号或 $"
+            )

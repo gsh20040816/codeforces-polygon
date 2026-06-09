@@ -9,12 +9,18 @@ from src.mcp.utils.problem_content import save_problem_file, save_problem_script
 from src.mcp.utils.problem_extra_validators import get_problem_extra_validators
 from src.mcp.utils.problem_file import view_problem_file
 from src.mcp.utils.problem_info import get_problem_info
+from src.mcp.utils.problem_packages import commit_problem_changes
 from src.mcp.utils.problem_interactor import get_problem_interactor
 from src.mcp.utils.problem_solution_view import view_problem_solution
 from src.mcp.utils.problem_solutions import get_problem_solutions
 from src.mcp.utils.problem_save_statement import save_problem_statement
 from src.mcp.utils.problem_sources import save_problem_solution
-from src.mcp.utils.problem_tests_extended import save_problem_test_group
+from src.mcp.utils.problem_sources import set_problem_checker
+from src.mcp.utils.problem_tests_extended import (
+    delete_problem_test,
+    save_problem_test_group,
+    view_problem_test_input,
+)
 from src.mcp.utils.problem_update_info import update_problem_info
 from src.mcp.utils.problem_validator import get_problem_validator
 from src.mcp.utils.problems import get_problems
@@ -29,6 +35,7 @@ from src.polygon.models import (
     PointsPolicy,
     Problem,
     ProblemInfo,
+    PolygonHTTPError,
     Statement,
     SolutionTag,
     SourceType,
@@ -37,7 +44,7 @@ from src.polygon.models import (
 
 class MpcUtilsExtensionsTest(unittest.TestCase):
     @patch("src.mcp.utils.problem_content.get_problem_session")
-    def test_save_problem_file_parses_enum_inputs(self, session_mock):
+    def test_save_problem_file_passes_raw_source_type(self, session_mock):
         session = Mock()
         session.save_file.return_value = {"saved": True}
         session_mock.return_value = session
@@ -47,7 +54,7 @@ class MpcUtilsExtensionsTest(unittest.TestCase):
             file_type="resource",
             file_name="testlib.h",
             file_content="content",
-            source_type="main",
+            source_type="cpp.gcc14-64-msys2-g++23",
             stages=["COMPILE"],
             assets=["VALIDATOR"],
         )
@@ -61,7 +68,7 @@ class MpcUtilsExtensionsTest(unittest.TestCase):
             file_type=FileType.RESOURCE,
             name="testlib.h",
             file_content="content",
-            source_type=SourceType.MAIN,
+            source_type="cpp.gcc14-64-msys2-g++23",
             for_types=None,
             stages=["COMPILE"],
             assets=["VALIDATOR"],
@@ -82,7 +89,7 @@ class MpcUtilsExtensionsTest(unittest.TestCase):
                 problem_id=1,
                 file_type="source",
                 local_path=str(local_file),
-                source_type="checker",
+                source_type="cpp.g++17",
             )
 
         self.assertEqual(result["status"], "success")
@@ -93,12 +100,58 @@ class MpcUtilsExtensionsTest(unittest.TestCase):
             file_type=FileType.SOURCE,
             name="checker.cpp",
             file_content="int main() {}\n",
-            source_type=SourceType.CHECKER,
+            source_type="cpp.g++17",
             for_types=None,
             stages=None,
             assets=None,
             check_existing=None,
         )
+
+    def test_save_problem_script_rejects_lines_without_target(self):
+        result = save_problem_script(
+            problem_id=1,
+            testset="tests",
+            source="gen 1\n",
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["action"], "save_problem_script")
+        self.assertEqual(result["error_type"], "ValueError")
+        self.assertIn("缺少输出重定向", result["error"])
+
+    @patch("src.mcp.utils.problem_tests_extended.get_problem_session")
+    def test_delete_problem_test_calls_session(self, session_mock):
+        session = Mock()
+        session.delete_test.return_value = {"status": "OK"}
+        session_mock.return_value = session
+
+        result = delete_problem_test(problem_id=1, testset="tests", test_index=3)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["action"], "delete_problem_test")
+        session.delete_test.assert_called_once_with(testset="tests", test_index=3)
+
+    @patch("src.mcp.utils.problem_tests_extended.call_problem_session_method")
+    def test_view_problem_test_input_returns_structured_error_on_validator_crash(
+        self,
+        session_call_mock,
+    ):
+        session_call_mock.side_effect = PolygonHTTPError(
+            "Polygon HTTP 错误 (problem.testInput): status=400",
+            status_code=400,
+            response_text=(
+                '{"status":"FAILED","comment":"Unexpected verdict CRASHED\\r\\n'
+                'Input:\\r\\n1 2\\r\\n"}'
+            ),
+        )
+
+        result = view_problem_test_input(problem_id=1, testset="tests", test_index=2)
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["action"], "view_problem_test_input")
+        self.assertEqual(result["status_code"], 400)
+        self.assertIn("Unexpected verdict CRASHED", result["failure_comment"])
+        self.assertEqual(result["partial_input"], "1 2\r\n")
 
     @patch("src.mcp.utils.problem_info.call_problem_session_method")
     def test_get_problem_info_passes_pin(self, session_call_mock):
@@ -212,6 +265,41 @@ class MpcUtilsExtensionsTest(unittest.TestCase):
         self.assertEqual(result["action"], "save_problem_solution")
         self.assertEqual(result["error_type"], "ValueError")
         self.assertIn("只支持 solution 类型", result["error"])
+
+    @patch("src.mcp.utils.problem_packages.get_problem_session")
+    def test_commit_problem_changes_preserves_commit_message_without_conflict(self, session_mock):
+        session = Mock()
+        session.commit_changes.return_value = {"status": "OK"}
+        session_mock.return_value = session
+
+        result = commit_problem_changes(
+            problem_id=1,
+            minor_changes=True,
+            message="fix: sync polygon",
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["commit_message"], "fix: sync polygon")
+        session.commit_changes.assert_called_once_with(
+            minor_changes=True,
+            message="fix: sync polygon",
+        )
+
+    @patch("src.mcp.utils.problem_sources.get_problem_session")
+    def test_set_problem_checker_treats_failed_setter_as_success_when_readback_matches(
+        self,
+        session_mock,
+    ):
+        session = Mock()
+        session.set_checker.side_effect = RuntimeError("Internal Server Error")
+        session.get_checker.return_value = "checker.cpp"
+        session_mock.return_value = session
+
+        result = set_problem_checker(problem_id=1, checker="checker.cpp")
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["observed_binding"], "checker.cpp")
+        self.assertIn("Internal Server Error", result["operation_warning"])
 
     @patch("src.mcp.utils.problem_file.call_problem_session_method")
     def test_view_problem_file_parses_file_type_with_common_helper(self, session_call_mock):

@@ -22,6 +22,7 @@ class ReadmeDocumentationTest(unittest.TestCase):
             "save_problem_statement",
             "save_problem_script",
             "save_problem_test",
+            "delete_problem_test",
             "set_problem_validator",
             "save_problem_solution",
             "check_problem_readiness",
@@ -59,7 +60,7 @@ class ReadmeDocumentationTest(unittest.TestCase):
             "CHANGELOG.md",
             "release notes",
             "新增工具、修复问题和兼容性变更",
-            "git tag v0.12.1 && git push origin v0.12.1",
+            "git tag v0.13.0 && git push origin v0.13.0",
         ):
             self.assertIn(term, self.readme)
 

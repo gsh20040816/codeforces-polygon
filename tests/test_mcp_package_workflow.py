@@ -79,6 +79,9 @@ class MpcPackageWorkflowTest(unittest.TestCase):
         self.assertEqual(result["target_package_id"], 7)
         self.assertEqual(result["package"]["id"], 7)
         self.assertEqual(result["package"]["state"], "FAILED")
+        self.assertEqual(result["failure_reason"], "build")
+        self.assertEqual(result["error_type"], "RuntimeError")
+        self.assertEqual(result["result"], result["package"])
 
     @patch("src.mcp.utils.problem_package_workflow.time.sleep")
     @patch("src.mcp.utils.problem_package_workflow.get_problem_session")

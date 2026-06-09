@@ -148,7 +148,7 @@ def prepare_problem_release(
     force: bool = False,
 ) -> dict[str, Any]:
     """
-    按发布流程执行：更新工作副本、检查 readiness、构建并等待、提交修改。
+    按发布流程执行：更新工作副本、检查 readiness、提交修改、构建并等待。
     """
     release_options = {
         "testset": testset,
@@ -228,6 +228,53 @@ def prepare_problem_release(
                 release_options=release_options,
             )
 
+        release_warnings: list[str] = []
+        pre_commit_snapshot = None
+        try:
+            pre_commit_snapshot = _get_problem_snapshot(session)
+        except Exception as exc:
+            release_warnings.append(f"提交前题目快照获取失败: {exc}")
+
+        commit_result = session.commit_changes(
+            minor_changes=minor_changes,
+            message=message,
+        )
+        if _is_failed_response(commit_result):
+            return build_operation_result(
+                action="prepare_problem_release",
+                success=False,
+                message="工作副本提交失败，停止构建",
+                result=commit_result,
+                problem_id=problem_id,
+                stage="commit",
+                can_proceed=False,
+                decision="commit_failed",
+                can_retry=True,
+                recovery_actions=_build_release_recovery_actions(
+                    "commit_failed",
+                    problem_id=problem_id,
+                    release_options=release_options,
+                    readiness=readiness,
+                    build_result=None,
+                ),
+                update_result=update_result,
+                readiness=readiness,
+                build_result=None,
+                commit_result=commit_result,
+                pre_commit_snapshot=pre_commit_snapshot,
+                release_warnings=release_warnings,
+                release_options=release_options,
+            )
+
+        post_commit_snapshot = None
+        try:
+            post_commit_snapshot = _get_problem_snapshot(session)
+        except Exception as exc:
+            release_warnings.append(f"提交后题目快照获取失败: {exc}")
+
+        if post_commit_snapshot is not None and post_commit_snapshot.get("modified"):
+            release_warnings.append("提交后题目仍处于 modified 状态，可能还有未提交改动")
+
         build_result = build_problem_package_and_wait(
             problem_id=problem_id,
             full=full,
@@ -240,7 +287,7 @@ def prepare_problem_release(
             return build_operation_result(
                 action="prepare_problem_release",
                 success=False,
-                message="题目包未成功构建，停止提交",
+                message="工作副本已提交，但题目包未成功构建",
                 result=build_result,
                 problem_id=problem_id,
                 stage="build",
@@ -257,55 +304,12 @@ def prepare_problem_release(
                 update_result=update_result,
                 readiness=readiness,
                 build_result=build_result,
-                release_options=release_options,
-            )
-
-        release_warnings: list[str] = []
-        pre_commit_snapshot = None
-        try:
-            pre_commit_snapshot = _get_problem_snapshot(session)
-        except Exception as exc:
-            release_warnings.append(f"提交前题目快照获取失败: {exc}")
-
-        commit_result = session.commit_changes(
-            minor_changes=minor_changes,
-            message=message,
-        )
-        if _is_failed_response(commit_result):
-            return build_operation_result(
-                action="prepare_problem_release",
-                success=False,
-                message="构建成功，但提交修改失败",
-                result=commit_result,
-                problem_id=problem_id,
-                stage="commit",
-                can_proceed=False,
-                decision="commit_failed",
-                can_retry=True,
-                recovery_actions=_build_release_recovery_actions(
-                    "commit_failed",
-                    problem_id=problem_id,
-                    release_options=release_options,
-                    readiness=readiness,
-                    build_result=build_result,
-                ),
-                update_result=update_result,
-                readiness=readiness,
-                build_result=build_result,
                 commit_result=commit_result,
                 pre_commit_snapshot=pre_commit_snapshot,
+                post_commit_snapshot=post_commit_snapshot,
                 release_warnings=release_warnings,
                 release_options=release_options,
             )
-
-        post_commit_snapshot = None
-        try:
-            post_commit_snapshot = _get_problem_snapshot(session)
-        except Exception as exc:
-            release_warnings.append(f"提交后题目快照获取失败: {exc}")
-
-        if post_commit_snapshot is not None and post_commit_snapshot.get("modified"):
-            release_warnings.append("提交后题目仍处于 modified 状态，可能还有未提交改动")
 
         package_revision = build_result.get("package", {}).get("revision")
         committed_revision = (
