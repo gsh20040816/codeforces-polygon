@@ -23,7 +23,14 @@ TIMEOUT_SECONDS = 120
 
 
 class PolygonError(Exception):
-    """Polygon rejected a request, or the request could not be made."""
+    """Polygon rejected a request, or the request could not be made.
+
+    ``status`` is the HTTP status code when the error came from an HTTP response.
+    """
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 def _to_bytes(value: Any) -> bytes:
@@ -49,11 +56,20 @@ def sign(method: str, fields: dict[str, bytes], secret: str, rand: str | None = 
     return rand.encode() + hashlib.sha512(base).hexdigest().encode()
 
 
-def _failure_message(method: str, response: requests.Response) -> str:
+def _envelope(response: requests.Response) -> dict | None:
+    """The ``{"status": ...}`` JSON envelope, or None for any other body.
+
+    Polygon labels JSON as text/html, so the body is inspected instead of Content-Type.
+    """
     try:
         data = response.json()
     except ValueError:
-        data = {}
+        return None
+    return data if isinstance(data, dict) and "status" in data else None
+
+
+def _failure_message(method: str, response: requests.Response) -> str:
+    data = _envelope(response) or {}
     if data.get("comment"):
         details = data.get("result")  # e.g. DeleteTestsResult explaining which tests failed
         return f"{method}: {data['comment']}" + (f" {json.dumps(details, ensure_ascii=False)}" if details else "")
@@ -82,7 +98,8 @@ class Polygon:
         """Call an API method.  ``None`` params are omitted.
 
         Returns the ``result`` field of the JSON response, or the response
-        body as bytes when ``raw`` is true (file/test/package downloads).
+        body as bytes for file/test/package downloads: when ``raw`` is true,
+        or when a successful response is not a JSON status envelope.
         """
         fields = {key: _to_bytes(value) for key, value in params.items() if value is not None}
         fields["apiKey"] = self.key.encode()
@@ -94,12 +111,13 @@ class Polygon:
         )
         if raw and response.status_code == 200:
             return response.content
-        try:
-            data = response.json()
-        except ValueError:
-            raise PolygonError(_failure_message(method, response)) from None
+        data = _envelope(response)
+        if data is None:
+            if response.status_code == 200:
+                return response.content  # a file, test or script body although raw was not requested
+            raise PolygonError(_failure_message(method, response), response.status_code)
         if data.get("status") != "OK":
-            raise PolygonError(_failure_message(method, response))
+            raise PolygonError(_failure_message(method, response), response.status_code)
         return data.get("result")
 
 

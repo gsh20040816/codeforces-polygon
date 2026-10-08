@@ -7,7 +7,10 @@ import time
 from collections import Counter
 from typing import Any, Callable
 
+import requests
+
 from .client import Polygon, PolygonError
+from .polyman import COMMENT_RE, preprocess
 
 _RESOURCE_PATTERNS = (
     re.compile(r"\\includegraphics(?:\[[^\]]*])?\{([^}]+)\}"),
@@ -68,6 +71,17 @@ def _group_cycles(dependencies: dict[str, list[str]]) -> list[str]:
         if group not in state:
             visit(group)
     return sorted(cycles)
+
+
+def _command(line: str) -> str:
+    """``gen 10   > $`` and Polygon's scriptLine ``gen 10`` both become ``gen 10``."""
+    arrow = line.rfind(">")
+    return " ".join((line[:arrow] if arrow >= 0 else line).split())
+
+
+def _script_commands(script: str) -> set[str]:
+    lines = preprocess(script)  # expands <#list>, keeps line structure
+    return {_command(COMMENT_RE.sub(" ", line)) for line in lines if COMMENT_RE.sub(" ", line).strip()}
 
 
 def check_problem(api: Polygon, problem_id: int, pin: str | None = None, testset: str = "tests") -> dict:
@@ -146,9 +160,8 @@ def check_problem(api: Polygon, problem_id: int, pin: str | None = None, testset
 
     generated = [t for t in tests if not t.get("manual")]
     if generated:
-        script_lines = {line.strip() for line in q("problem.script", raw=True, testset=testset).decode(
-            "utf-8", "replace").splitlines()}
-        drifted = [t["index"] for t in generated if (t.get("scriptLine") or "").strip() not in script_lines]
+        commands = _script_commands(q("problem.script", raw=True, testset=testset).decode("utf-8", "replace"))
+        drifted = [t["index"] for t in generated if _command(t.get("scriptLine") or "") not in commands]
         if drifted:
             warnings.append(f"generated tests not matching the current script: {drifted}")
 
@@ -210,9 +223,17 @@ def build_package_and_wait(
     api.call("problem.buildPackage", problemId=problem_id, pin=pin, full=full, verify=verify)
     deadline = clock() + timeout
     package = None
+    last_error = None
     while True:
-        new = [p for p in api.call("problem.packages", problemId=problem_id, pin=pin) or []
-               if p["id"] not in before]
+        try:
+            packages = api.call("problem.packages", problemId=problem_id, pin=pin) or []
+            last_error = None
+        except (requests.RequestException, PolygonError) as exc:
+            if isinstance(exc, PolygonError) and (exc.status or 0) < 500:
+                raise
+            # The build is already running; a flaky poll must not make the caller start another one.
+            packages, last_error = [], exc
+        new = [p for p in packages if p["id"] not in before]
         if new:
             package = max(new, key=lambda p: p["id"])
             if package["state"] == "READY":
@@ -221,5 +242,9 @@ def build_package_and_wait(
                 raise PolygonError(f"package {package['id']} FAILED: {package.get('comment') or 'no comment'}")
         if clock() >= deadline:
             state = f"package {package['id']} is {package['state']}" if package else "no new package yet"
-            raise PolygonError(f"timed out after {timeout:g}s waiting for package build ({state})")
+            if last_error is not None:
+                state += f"; last poll failed: {last_error}"
+            raise PolygonError(
+                f"timed out after {timeout:g}s waiting for package build ({state}). The build was "
+                "started; check it with `package list` instead of building again")
         sleep(interval)

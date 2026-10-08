@@ -8,8 +8,8 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
-from cf_polygon import cli
-from cf_polygon.client import Polygon, PolygonError
+from codeforces_polygon import cli
+from codeforces_polygon.client import Polygon, PolygonError
 
 ENV = {"POLYGON_API_KEY": "k", "POLYGON_API_SECRET": "s"}
 
@@ -26,7 +26,10 @@ class Run:
                 patch.object(Polygon, "call", autospec=True, return_value=result,
                              side_effect=side_effect) as call, \
                 patch("sys.stdout", stdout), patch("sys.stdin", stdin_wrapper), redirect_stderr(stderr):
-            self.code = cli.main(argv)
+            try:
+                self.code = cli.main(argv)
+            except SystemExit as exc:  # argparse usage errors
+                self.code = exc.code
             stdout.flush()
         self.stdout = buffer.getvalue()
         self.calls = [(c.args[1], c.kwargs) for c in call.call_args_list]
@@ -63,7 +66,7 @@ class HelpTest(unittest.TestCase):
                 with self.assertRaises(SystemExit) as ctx:
                     cli.main(path + ["--help"])
                 self.assertEqual(ctx.exception.code, 0)
-                self.assertIn("usage: cf-polygon", out.getvalue())
+                self.assertIn("usage: polygonctl", out.getvalue())
 
     def test_usage_error_exits_2(self):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as ctx:
@@ -207,7 +210,8 @@ class CommandMappingTest(unittest.TestCase):
 
     def test_missing_upload_file_is_reported(self):
         r = Run(["solution", "upload", "9", "/nonexistent/main.cpp"])
-        self.assertEqual(r.code, 1)
+        self.assertEqual(r.code, 2)
+        self.assertEqual(r.calls, [])
         self.assertIn("main.cpp", r.stderr)
 
     def test_solution_upload(self):
@@ -284,7 +288,7 @@ class CommandMappingTest(unittest.TestCase):
                                   {"problemId": 9, "pin": None, "full": True, "verify": False}))
 
     def test_package_build_wait_uses_workflow(self):
-        with patch("cf_polygon.cli.workflow.build_package_and_wait",
+        with patch("codeforces_polygon.cli.workflow.build_package_and_wait",
                    return_value={"id": 5, "state": "READY"}) as wait:
             r = Run(["package", "build", "9", "--wait", "--timeout", "60", "--json"])
         self.assertEqual(json.loads(r.out), {"id": 5, "state": "READY"})
@@ -311,8 +315,119 @@ class CommandMappingTest(unittest.TestCase):
 
     def test_raw_call_rejects_malformed_param(self):
         r = Run(["call", "problem.info", "problemId"])
+        self.assertEqual(r.code, 2)
+        self.assertIn("KEY=VALUE", r.stderr)
+        self.assertEqual(r.calls, [])
+
+    def test_new_solution_tags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "tm.cpp")
+            path.write_bytes(b"x")
+            for tag in ("TM", "NR"):
+                r = Run(["solution", "upload", "9", str(path), "--tag", tag])
+                self.assertEqual(r.call[1]["tag"], tag)
+        r = Run(["solution", "extra-tag", "9", "a.cpp", "--testset", "tests", "--tag", "NR"])
+        self.assertEqual(r.call[1]["tag"], "NR")
+        r = Run(["solution", "extra-tag", "9", "a.cpp", "--testset", "tests", "--tag", "MA"])
+        self.assertEqual(r.code, 2)
+
+    def test_commit_conflict_is_an_error(self):
+        r = Run(["problem", "commit", "9"], result={"committed": False, "conflictOccurred": True,
+                                                    "message": "Conflict in statements"})
         self.assertEqual(r.code, 1)
-        self.assertIn("key=value", r.stderr)
+        self.assertIn("Conflict in statements", r.stderr)
+
+    def test_commit_without_changes_is_ok(self):
+        r = Run(["problem", "commit", "9", "--json"], result={"committed": False, "conflictOccurred": False,
+                                                              "message": "No changes"})
+        self.assertEqual(r.code, 0)
+        self.assertEqual(json.loads(r.out)["message"], "No changes")
+
+    def test_non_utf8_stdout_is_reconfigured(self):
+        buffer = io.BytesIO()
+        stdout = io.TextIOWrapper(buffer, encoding="latin-1")
+        with patch.dict(os.environ, ENV, clear=True), patch("sys.stdout", stdout), \
+                patch.object(Polygon, "call", return_value="Задача 题目"):
+            self.assertEqual(cli.main(["problem", "description", "1"]), 0)
+            stdout.flush()
+        self.assertEqual(buffer.getvalue().decode("utf-8"), "Задача 题目\n")
+
+    def test_raw_call_missing_file_is_usage_error(self):
+        r = Run(["call", "problem.saveFile", "problemId=1", "file=@/nonexistent/x.cpp"])
+        self.assertEqual(r.code, 2)
+        self.assertIn("x.cpp", r.stderr)
+
+    def test_raw_call_reads_stdin(self):
+        r = Run(["call", "problem.saveFile", "problemId=1", "file=@-"], stdin=b"abc")
+        self.assertEqual(r.call, ("problem.saveFile", {"raw": False, "problemId": "1", "file": b"abc"}))
+
+    def test_stdin_twice_is_rejected(self):
+        r = Run(["statement", "save", "1", "--legend", "@-", "--input", "@-"], stdin=b"x")
+        self.assertEqual(r.code, 2)
+        self.assertIn("only once", r.stderr)
+        self.assertEqual(r.calls, [])
+
+
+class NewFamiliesTest(unittest.TestCase):
+    """access / note / issue / material and the remaining problem methods."""
+
+    P = {"problemId": 9, "pin": None}
+
+    def assertCall(self, argv, method, result=None, **params):
+        r = Run(argv, result=result)
+        self.assertEqual(r.code, 0, r.stderr)
+        self.assertEqual(r.call, (method, dict(self.P, **params)))
+        return r
+
+    def test_access(self):
+        self.assertCall(["access", "list", "9"], "problem.accesses")
+        self.assertCall(["access", "set", "9", "alice", "WRITE"], "problem.setAccess", login="alice",
+                        accessType="WRITE")
+        self.assertEqual(Run(["access", "set", "9", "alice", "OWNER"]).code, 2)
+
+    def test_note(self):
+        self.assertCall(["note", "show", "9"], "problem.note")
+        self.assertCall(["note", "set", "9", ""], "problem.saveNote", note="")
+
+    def test_issues(self):
+        r = Run(["issue", "list", "9", "--open", "--json"],
+                result=[{"id": 1, "status": "OPENED"}, {"id": 2, "status": "CLOSED"}, {"id": 3, "status": "REOPENED"}])
+        self.assertEqual([i["id"] for i in json.loads(r.out)], [1, 3])
+        self.assertCall(["issue", "add", "9", "--type", "BUG", "--content", "Test 5 is invalid"],
+                        "problem.addIssue", type="BUG", content="Test 5 is invalid", assignee=None)
+        self.assertCall(["issue", "update", "9", "12", "--status", "CLOSED", "--comment", "fixed",
+                         "--assignee", ""], "problem.updateIssue", issueId=12, comment="fixed",
+                        status="CLOSED", type=None, assignee="")
+
+    def test_materials(self):
+        self.assertCall(["material", "list", "9"], "problem.materials")
+        items = '[{"type":"SOLUTIONS","names":["main.cpp"]}]'
+        self.assertCall(["material", "set", "9", "sols", "--publish-strategy", "WITH_TUTORIAL", "--items", items,
+                         "--rename-from", "old"], "problem.setMaterial", name="sols", originalName="old",
+                        publishStrategy="WITH_TUTORIAL", items=items)
+        self.assertCall(["material", "remove", "9", "sols"], "problem.setMaterial", name="sols", remove=True)
+
+    def test_render_statements_saves_files(self):
+        result = {"revision": 3, "statements": [
+            {"language": "english", "html": {"status": "OK", "contentBase64": "PGgxPg=="},
+             "pdf": {"status": "FAILED", "message": "LaTeX error"}}], "tutorials": []}
+        with tempfile.TemporaryDirectory() as tmp:
+            r = Run(["statement", "render", "9", "--save-dir", tmp, "--json"], result=result)
+            self.assertEqual(r.call, ("problem.renderStatements", dict(self.P, includeContent=True)))
+            self.assertEqual(Path(tmp, "statement-english.html").read_bytes(), b"<h1>")
+            out = json.loads(r.out)
+            self.assertNotIn("contentBase64", out["statements"][0]["html"])
+            self.assertEqual(out["statements"][0]["html"]["path"], str(Path(tmp, "statement-english.html")))
+        r = Run(["statement", "render", "9", "--strict"], result={"statements": [
+            {"language": "english", "html": {"status": "OK"}, "pdf": {"status": "FAILED", "message": "LaTeX"}}]})
+        self.assertEqual(r.code, 1)
+        self.assertIn("english pdf: LaTeX", r.stderr)
+
+    def test_script_preview_and_percent(self):
+        self.assertCall(["test", "clear-script", "9"], "problem.clearScript", testset="tests")
+        self.assertCall(["test", "preview", "9", "--testset", "pre"], "problem.previewTests", testset="pre")
+        self.assertCall(["test", "enable-checker-percent", "9", "--disable"],
+                        "problem.enableTreatPointsFromCheckerAsPercent", enable=False)
 
 
 class DownloadCommandTest(unittest.TestCase):
@@ -320,30 +435,30 @@ class DownloadCommandTest(unittest.TestCase):
 
     def run_download(self, argv, env=ACCOUNT):
         with tempfile.TemporaryDirectory() as tmp, \
-                patch("cf_polygon.cli.download", return_value=b"x") as download:
+                patch("codeforces_polygon.cli.download", return_value=b"x") as download:
             r = Run(argv + ["-o", f"{tmp}/out"], env=env)
         return r, download
 
     def test_problem_xml_url(self):
-        r, download = self.run_download(["download", "problem-xml", "https://polygon.codeforces.com/p/me/a/",
+        r, download = self.run_download(["download", "problem-xml", "https://polygon.codeforces.com/p85dIBF/me/a/",
                                          "--revision", "3"])
         self.assertEqual(r.code, 0)
-        download.assert_called_once_with("https://polygon.codeforces.com/p/me/a/problem.xml", "me", "pw",
+        download.assert_called_once_with("https://polygon.codeforces.com/p85dIBF/me/a/problem.xml", "me", "pw",
                                          pin=None, revision=3)
 
     def test_statements_pdf_url(self):
-        _, download = self.run_download(["download", "statements-pdf", "https://polygon.codeforces.com/c/1/x",
+        _, download = self.run_download(["download", "statements-pdf", "https://polygon.codeforces.com/c/50431a121273b7e31f4200e7",
                                          "--lang", "russian"])
-        self.assertEqual(download.call_args.args[0], "https://polygon.codeforces.com/c/1/x/russian/statements.pdf")
+        self.assertEqual(download.call_args.args[0], "https://polygon.codeforces.com/c/50431a121273b7e31f4200e7/russian/statements.pdf")
 
     def test_package_by_url(self):
-        _, download = self.run_download(["download", "package", "https://polygon.codeforces.com/p/me/a",
+        _, download = self.run_download(["download", "package", "https://polygon.codeforces.com/p85dIBF/me/a",
                                          "--type", "linux"])
-        download.assert_called_once_with("https://polygon.codeforces.com/p/me/a", "me", "pw",
+        download.assert_called_once_with("https://polygon.codeforces.com/p85dIBF/me/a", "me", "pw",
                                          pin=None, revision=None, type="linux")
 
     def test_requires_account_not_api_keys(self):
-        r, download = self.run_download(["download", "contest-xml", "https://polygon.codeforces.com/c/1/x"],
+        r, download = self.run_download(["download", "contest-xml", "https://polygon.codeforces.com/c/50431a121273b7e31f4200e7"],
                                         env=ENV)
         self.assertEqual(r.code, 1)
         self.assertIn("POLYGON_LOGIN", r.stderr)

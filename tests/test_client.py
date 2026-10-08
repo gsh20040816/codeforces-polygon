@@ -3,7 +3,7 @@ import json
 import unittest
 from unittest.mock import Mock, patch
 
-from cf_polygon.client import Polygon, PolygonError, download, sign
+from codeforces_polygon.client import Polygon, PolygonError, download, sign
 
 
 def response(status=200, body=None, content=None, content_type="application/json"):
@@ -40,8 +40,8 @@ class SignTest(unittest.TestCase):
         self.assertEqual(len(sign("m", {}, "s")), 6 + 128)
 
 
-@patch("cf_polygon.client.time.time", return_value=1700000000)
-@patch("cf_polygon.client.requests.post")
+@patch("codeforces_polygon.client.time.time", return_value=1700000000)
+@patch("codeforces_polygon.client.requests.post")
 class CallTest(unittest.TestCase):
     def setUp(self):
         self.api = Polygon("key", "secret")
@@ -98,6 +98,21 @@ class CallTest(unittest.TestCase):
         with self.assertRaisesRegex(PolygonError, "HTTP 502: Bad Gateway"):
             self.api.call("problem.info", problemId=1)
 
+    def test_file_body_without_raw_is_returned_as_bytes(self, post, _time):
+        # `call problem.viewFile` without --raw; Polygon labels everything text/html
+        post.return_value = response(content=b"#include <cstdio>\n", content_type="text/html;charset=UTF-8")
+        self.assertEqual(self.api.call("problem.viewFile", problemId=1), b"#include <cstdio>\n")
+
+    def test_scalar_json_body_is_a_file_not_a_crash(self, post, _time):
+        post.return_value = response(body=5)
+        self.assertEqual(self.api.call("problem.testInput", problemId=1), b"5")
+
+    def test_http_status_is_kept_on_errors(self, post, _time):
+        post.return_value = response(status=503, content=b"busy")
+        with self.assertRaises(PolygonError) as ctx:
+            self.api.call("problem.info", problemId=1)
+        self.assertEqual(ctx.exception.status, 503)
+
     def test_bytes_params_are_sent_verbatim(self, post, _time):
         post.return_value = response(body={"status": "OK"})
         self.api.call("problem.saveStatementResource", problemId=1, name="a.png", file=b"\x89PNG\x00")
@@ -117,15 +132,15 @@ class FromEnvTest(unittest.TestCase):
         self.assertEqual((api.key, api.secret, api.url), ("k", "s", "https://example.test"))
 
 
-@patch("cf_polygon.client.requests.post")
+@patch("codeforces_polygon.client.requests.post")
 class DownloadTest(unittest.TestCase):
     def test_posts_credentials_and_params(self, post):
         post.return_value = response(content=b"<problem/>", content_type="application/xml")
-        content = download("https://polygon.codeforces.com/p/u/a/problem.xml", "me", "pw",
+        content = download("https://polygon.codeforces.com/p85dIBF/u/a/problem.xml", "me", "pw",
                            revision=12, pin=None)
         self.assertEqual(content, b"<problem/>")
         post.assert_called_once_with(
-            "https://polygon.codeforces.com/p/u/a/problem.xml",
+            "https://polygon.codeforces.com/p85dIBF/u/a/problem.xml",
             data={"login": "me", "password": "pw", "revision": "12"},
             timeout=120,
         )
@@ -133,7 +148,7 @@ class DownloadTest(unittest.TestCase):
     def test_html_response_means_login_failed(self, post):
         post.return_value = response(content=b"<html>login</html>", content_type="text/html;charset=UTF-8")
         with self.assertRaisesRegex(PolygonError, "HTML page"):
-            download("https://polygon.codeforces.com/c/1/x/contest.xml", "me", "bad")
+            download("https://polygon.codeforces.com/c/50431a121273b7e31f4200e7/contest.xml", "me", "bad")
 
 
 if __name__ == "__main__":

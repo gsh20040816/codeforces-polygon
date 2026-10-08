@@ -1,4 +1,4 @@
-"""``cf-polygon``: a command-line client for the Codeforces Polygon API.
+"""``polygonctl``: a command-line client for the Codeforces Polygon API.
 
 Each leaf command maps to one Polygon API method (or a small workflow) and
 returns plain data.  ``--json`` prints it as JSON; otherwise a compact text
@@ -8,6 +8,7 @@ form is printed.  Errors go to stderr with exit status 1 (2 for bad usage).
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -17,20 +18,45 @@ from typing import Any, Callable
 
 import requests
 
-from . import workflow
+from . import sync as polyman_sync, workflow
 from .client import Polygon, PolygonError, download
+from .polyman import ConfigError
 
 EPILOG = """\
 Credentials: POLYGON_API_KEY / POLYGON_API_SECRET for API commands,
 POLYGON_LOGIN / POLYGON_PASSWORD for the `download` group.
 Text options marked TEXT accept a literal, @path to read a UTF-8 file, or @- for stdin.
-Run `cf-polygon <group> <command> --help` for details on any command."""
+Run `polygonctl <group> <command> --help` for details on any command."""
 
 FILE_TYPES = ("source", "resource", "aux")
-SOLUTION_TAGS = ("MA", "OK", "RJ", "TL", "TO", "WA", "PE", "ML", "RE")
+SOLUTION_TAGS = ("MA", "OK", "RJ", "TL", "TO", "TM", "WA", "PE", "ML", "NR", "RE")
+EXTRA_TAGS = tuple(tag for tag in SOLUTION_TAGS if tag != "MA")
+ISSUE_TYPES = ("DISCUSSION", "ENHANCEMENT", "BUG")
+TAG_HELP = ("expected verdict: MA=main, OK, WA, TL, TO=TL-or-OK, TM=TL-or-ML, ML, RE, PE, "
+            "RJ=any rejection, NR=do not run")
+
+
+class Unfinished(PolygonError):
+    """A multi-step command finished with failed steps: print ``result`` anyway, then exit 1."""
+
+    def __init__(self, message: str, result: Any):
+        super().__init__(message)
+        self.result = result
 
 
 # --------------------------------------------------------------------------- helpers
+
+_stdin_used = False
+
+
+def _stdin() -> bytes:
+    """Read stdin once; a second ``@-``/``-`` in one command would silently get ``b''``."""
+    global _stdin_used
+    if _stdin_used:
+        raise argparse.ArgumentTypeError("stdin (@- or -) can be used only once per command")
+    _stdin_used = True
+    return sys.stdin.buffer.read()
+
 
 def text(value: str) -> str:
     """argparse type: literal text, ``@path`` file contents, or ``@-`` stdin.
@@ -40,14 +66,26 @@ def text(value: str) -> str:
     if not value.startswith("@"):
         return value
     try:
-        data = sys.stdin.buffer.read() if value == "@-" else Path(value[1:]).expanduser().read_bytes()
+        data = _stdin() if value == "@-" else Path(value[1:]).expanduser().read_bytes()
         return data.decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise argparse.ArgumentTypeError(f"{value}: {exc}") from None
 
 
-def read_upload(path: str) -> bytes:
-    return sys.stdin.buffer.read() if path == "-" else Path(path).expanduser().read_bytes()
+def upload(value: str) -> bytes:
+    """argparse type for upload paths: file bytes, or stdin for ``-``."""
+    try:
+        return _stdin() if value == "-" else Path(value).expanduser().read_bytes()
+    except OSError as exc:
+        raise argparse.ArgumentTypeError(f"{value}: {exc}") from None
+
+
+def param(value: str) -> tuple[str, Any]:
+    """argparse type for ``call``: ``KEY=VALUE``, or ``KEY=@path`` / ``KEY=@-`` for bytes."""
+    key, sep, val = value.partition("=")
+    if not sep or not key:
+        raise argparse.ArgumentTypeError(f"parameter must be KEY=VALUE: {value!r}")
+    return key, upload(val[1:]) if val.startswith("@") else val
 
 
 def upload_name(args: argparse.Namespace) -> str:
@@ -56,6 +94,10 @@ def upload_name(args: argparse.Namespace) -> str:
     if args.path == "-":
         raise PolygonError("--name is required when reading from stdin")
     return Path(args.path).name
+
+
+def upload_data(args: argparse.Namespace) -> bytes:
+    return upload(args.path)
 
 
 def api() -> Polygon:
@@ -155,7 +197,10 @@ def problem_cautions(a):
 
 
 def problem_commit(a):
-    return pq(a, "problem.commitChanges", minorChanges=a.minor or None, message=a.message)
+    result = pq(a, "problem.commitChanges", minorChanges=a.minor or None, message=a.message)
+    if isinstance(result, dict) and result.get("conflictOccurred"):
+        raise PolygonError(f"problem.commitChanges: {result.get('message') or 'conflict occurred'}")
+    return result  # committed=false with message "No changes" is a normal outcome
 
 
 def problem_update_working_copy(a):
@@ -191,6 +236,51 @@ def problem_set_tutorial(a):
     return pq(a, "problem.saveGeneralTutorial", tutorial=a.text)
 
 
+# --------------------------------------------------------------------------- access / note / issue / material
+
+def access_list(a):
+    return pq(a, "problem.accesses")
+
+
+def access_set(a):
+    return pq(a, "problem.setAccess", login=a.login, accessType=a.access)
+
+
+def note_show(a):
+    return pq(a, "problem.note")
+
+
+def note_set(a):
+    return pq(a, "problem.saveNote", note=a.text)
+
+
+def issue_list(a):
+    issues = pq(a, "problem.issues") or []
+    return [i for i in issues if i.get("status") != "CLOSED"] if a.open else issues
+
+
+def issue_add(a):
+    return pq(a, "problem.addIssue", type=a.type, content=a.content, assignee=a.assignee)
+
+
+def issue_update(a):
+    return pq(a, "problem.updateIssue", issueId=a.issue_id, comment=a.comment, status=a.status,
+              type=a.type, assignee=a.assignee)
+
+
+def material_list(a):
+    return pq(a, "problem.materials")
+
+
+def material_set(a):
+    return pq(a, "problem.setMaterial", name=a.name, originalName=a.rename_from,
+              publishStrategy=a.publish_strategy, items=a.items)
+
+
+def material_remove(a):
+    return pq(a, "problem.setMaterial", name=a.name, remove=True)
+
+
 # --------------------------------------------------------------------------- statement
 
 def statement_list(a):
@@ -208,6 +298,28 @@ def statement_save(a):
               interaction=a.interaction, notes=a.notes, tutorial=a.tutorial)
 
 
+def statement_render(a):
+    result = pq(a, "problem.renderStatements", includeContent=bool(a.save_dir) or None)
+    if a.save_dir:
+        out = Path(a.save_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        for kind in ("statements", "tutorials"):
+            for item in result.get(kind) or []:
+                for fmt in ("html", "pdf"):
+                    render = item.get(fmt) or {}
+                    content = render.pop("contentBase64", None)
+                    if content is not None:
+                        path = out / f"{kind[:-1]}-{item['language']}.{fmt}"
+                        path.write_bytes(base64.b64decode(content))
+                        render["path"] = str(path)
+    failed = [f"{kind[:-1]} {item.get('language')} {fmt}: {(item.get(fmt) or {}).get('message')}"
+              for kind in ("statements", "tutorials") for item in result.get(kind) or []
+              for fmt in ("html", "pdf") if (item.get(fmt) or {}).get("status") == "FAILED"]
+    if failed and a.strict:
+        raise PolygonError("render failed: " + "; ".join(failed))
+    return result
+
+
 def statement_resources(a):
     return pq(a, "problem.statementResources")
 
@@ -217,7 +329,7 @@ def statement_view_resource(a):
 
 
 def statement_upload_resource(a):
-    return pq(a, "problem.saveStatementResource", name=upload_name(a), file=read_upload(a.path),
+    return pq(a, "problem.saveStatementResource", name=upload_name(a), file=upload_data(a),
               checkExisting=a.check_existing)
 
 
@@ -235,7 +347,7 @@ def file_view(a):
 
 
 def file_upload(a):
-    return pq(a, "problem.saveFile", type=a.type, name=upload_name(a), file=read_upload(a.path),
+    return pq(a, "problem.saveFile", type=a.type, name=upload_name(a), file=upload_data(a),
               sourceType=a.source_type, forTypes=a.for_types,
               stages=";".join(a.stages) if a.stages else None,
               assets=";".join(a.assets) if a.assets else None,
@@ -253,7 +365,7 @@ def solution_view(a):
 
 
 def solution_upload(a):
-    return pq(a, "problem.saveSolution", name=upload_name(a), file=read_upload(a.path),
+    return pq(a, "problem.saveSolution", name=upload_name(a), file=upload_data(a),
               tag=a.tag, sourceType=a.source_type, checkExisting=a.check_existing)
 
 
@@ -319,8 +431,20 @@ def test_script(a):
     return pq(a, "problem.script", raw=True, testset=a.testset)
 
 
+def test_clear_script(a):
+    return pq(a, "problem.clearScript", testset=a.testset)
+
+
+def test_preview(a):
+    return pq(a, "problem.previewTests", testset=a.testset)
+
+
+def test_enable_checker_percent(a):
+    return pq(a, "problem.enableTreatPointsFromCheckerAsPercent", enable=not a.disable)
+
+
 def test_save_script(a):
-    return pq(a, "problem.saveScript", testset=a.testset, source=read_upload(a.path))
+    return pq(a, "problem.saveScript", testset=a.testset, source=upload_data(a))
 
 
 def test_enable_groups(a):
@@ -396,13 +520,31 @@ def download_statements_pdf(a):
 
 
 def raw_call(a):
-    params: dict[str, Any] = {}
-    for item in a.params:
-        key, sep, value = item.partition("=")
-        if not sep:
-            raise PolygonError(f"parameter must be key=value: {item!r}")
-        params[key] = read_upload(value[1:]) if value.startswith("@") else value
-    return api().call(a.method, raw=a.raw, **params)
+    return api().call(a.method, raw=a.raw, **dict(a.params))
+
+
+# --------------------------------------------------------------------------- sync
+
+def sections(value: str) -> list[str]:
+    names = [v.strip() for v in value.split(",") if v.strip()]
+    unknown = [n for n in names if n not in polyman_sync.SECTIONS]
+    if unknown or not names:
+        raise argparse.ArgumentTypeError(
+            f"unknown section(s) {', '.join(unknown) or value!r}; choose from {', '.join(polyman_sync.SECTIONS)}")
+    return names
+
+
+def sync_dir(a):
+    result = polyman_sync.sync(api(), a.dir, dry_run=a.dry_run, prune=a.prune, only=a.only, pin=a.pin)
+    shown = result if a.json else result["steps"]
+    if not result["ok"]:
+        failed = [f"{s['section']}/{s['target']}: {s['detail']}" for s in result["steps"] if s["status"] == "failed"]
+        raise Unfinished(f"{len(failed)} step(s) failed: " + "; ".join(failed), shown)
+    return shown
+
+
+def pull_dir(a):
+    return polyman_sync.pull(api(), a.problem_id, a.dir, pin=a.pin)
 
 
 # --------------------------------------------------------------------------- parser
@@ -445,7 +587,7 @@ def _check_existing(parser):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="cf-polygon",
+        prog="polygonctl",
         description="Command-line client for the Codeforces Polygon API, designed for agents and scripts.",
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -488,14 +630,59 @@ def build_parser() -> argparse.ArgumentParser:
     p = _leaf(g, "set-tutorial", problem_set_tutorial, "Replace the general tutorial")
     p.add_argument("text", type=text, metavar="TEXT")
 
+    # access / note / issue / material (problem-level; access, note and issues bypass the working copy)
+    g = _group(root, "access", "Direct problem access (changes apply immediately, no commit)")
+    _leaf(g, "list", access_list, "List direct access entries (users and @groups)")
+    p = _leaf(g, "set", access_set, "Grant, change or remove one user's direct access; notifies the user")
+    p.add_argument("login", help="exact user login (not an @group)")
+    p.add_argument("access", choices=("READ", "WRITE", "NONE"), help="NONE removes the direct entry")
+
+    g = _group(root, "note", "The problem's private note, shown in problem lists (not statement notes)")
+    _leaf(g, "show", note_show, "Print the problem note")
+    p = _leaf(g, "set", note_set, "Replace the problem note (up to 50 characters, applies immediately)")
+    p.add_argument("text", type=text, metavar="TEXT", help="note text; '' clears it")
+
+    g = _group(root, "issue", "Problem issues (applied immediately and e-mailed like the web UI)")
+    p = _leaf(g, "list", issue_list, "List issues with comments, most recently changed first")
+    p.add_argument("--open", action="store_true", help="only OPENED/REOPENED issues")
+    p = _leaf(g, "add", issue_add, "Open a new issue")
+    p.add_argument("--type", choices=ISSUE_TYPES, required=True)
+    p.add_argument("--content", type=text, metavar="TEXT", required=True, help="issue text (Markdown)")
+    p.add_argument("--assignee", help="login with WRITE access to assign it to")
+    p = _leaf(g, "update", issue_update,
+              "Comment on, close/reopen, retype or reassign an issue (needs a comment or a change)")
+    p.add_argument("issue_id", type=int)
+    p.add_argument("--comment", type=text, metavar="TEXT", help="comment (Markdown)")
+    p.add_argument("--status", choices=("CLOSED", "REOPENED"))
+    p.add_argument("--type", choices=ISSUE_TYPES)
+    p.add_argument("--assignee", help="new assignee login; '' removes the assignee")
+
+    g = _group(root, "material", "Publishable materials (working copy; commit to keep)")
+    _leaf(g, "list", material_list, "List materials with their items")
+    p = _leaf(g, "set", material_set, "Create or fully replace (optionally rename) a material")
+    p.add_argument("name", help="material name after saving (1-40 chars, a valid file name)")
+    p.add_argument("--publish-strategy", choices=("NONE", "WITH_TUTORIAL", "WITH_STATEMENT"), required=True,
+                   help="NONE keeps the material unpublished")
+    p.add_argument("--items", type=text, metavar="TEXT", required=True,
+                   help='JSON array of MaterialItem, e.g. \'[{"type":"SOLUTIONS","names":["main.cpp"]}]\'')
+    p.add_argument("--rename-from", metavar="OLD", help="rename material OLD to NAME atomically")
+    p = _leaf(g, "remove", material_remove, "Remove a material (no-op if absent)")
+    p.add_argument("name")
+
     # statement
     g = _group(root, "statement", "Read and write problem statements and their resources")
     p = _leaf(g, "list", statement_list, "Show statements for all languages (or one with --lang)")
     p.add_argument("--lang", help="only this language, e.g. english")
+    p = _leaf(g, "render", statement_render,
+              "Render statements and tutorials (HTML + PDF) from the working copy; can take minutes")
+    p.add_argument("--save-dir", metavar="DIR",
+                   help="download the rendered files into DIR as statement-<lang>.pdf etc.")
+    p.add_argument("--strict", action="store_true", help="exit 1 if any render failed")
     p = _leaf(g, "save", statement_save, "Create or update a statement; omitted sections are kept")
     p.add_argument("--lang", default="english", help="statement language (default: english)")
     p.add_argument("--encoding", default="UTF-8", help="statement encoding (default: UTF-8)")
-    p.add_argument("--name", type=text, metavar="TEXT", help="problem title in this language")
+    p.add_argument("--name", type=text, metavar="TEXT",
+                   help="problem title in this language (no trailing newline: Polygon rejects it)")
     for section in ("legend", "input", "output", "scoring", "interaction", "notes", "tutorial"):
         p.add_argument(f"--{section}", type=text, metavar="TEXT", help=f"{section} section (LaTeX)")
     _leaf(g, "resources", statement_resources, "List statement resource files (images etc.)")
@@ -515,11 +702,12 @@ def build_parser() -> argparse.ArgumentParser:
     _upload(p, "file")
     p.add_argument("--type", choices=FILE_TYPES, default="source", help="file type (default: source)")
     p.add_argument("--source-type", help="compiler for source files, e.g. cpp.g++17 (default: by extension)")
-    p.add_argument("--for-types", help="resource files only: forTypes, e.g. 'cpp.*'; '' removes "
-                                       "the resource's advanced properties")
-    p.add_argument("--stages", nargs="+", choices=("COMPILE", "RUN"), help="resource files only")
+    p.add_argument("--for-types", help="resource files only: forTypes, e.g. 'cpp.*'; give it together with "
+                                       "--stages and --assets; '' alone removes the advanced properties")
+    p.add_argument("--stages", nargs="+", choices=("COMPILE", "RUN"),
+                   help="resource files only; Polygon currently accepts only COMPILE")
     p.add_argument("--assets", nargs="+", choices=("VALIDATOR", "INTERACTOR", "CHECKER", "SOLUTION"),
-                   help="resource files only")
+                   help="resource files only; Polygon currently accepts only SOLUTION")
 
     # solution
     g = _group(root, "solution", "Main, correct and wrong solutions")
@@ -528,8 +716,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name", help="solution file name")
     p = _leaf(g, "upload", solution_upload, "Upload or replace a solution")
     _upload(p, "solution")
-    p.add_argument("--tag", choices=SOLUTION_TAGS,
-                   help="expected verdict: MA=main, OK, WA, TL, TO=TL-or-OK, ML, RE, PE, RJ")
+    p.add_argument("--tag", choices=SOLUTION_TAGS, help=TAG_HELP)
     p.add_argument("--source-type", help="compiler, e.g. cpp.g++17 (default: by extension)")
     p = _leaf(g, "extra-tag", solution_extra_tag,
               "Add or remove a per-testset or per-group expected verdict for a solution")
@@ -538,7 +725,7 @@ def build_parser() -> argparse.ArgumentParser:
     where.add_argument("--testset")
     where.add_argument("--group")
     what = p.add_mutually_exclusive_group(required=True)
-    what.add_argument("--tag", choices=SOLUTION_TAGS)
+    what.add_argument("--tag", choices=EXTRA_TAGS, help="extra expected verdict (MA is not allowed)")
     what.add_argument("--remove", action="store_true", help="remove the extra tag")
 
     # validator / checker / interactor
@@ -607,6 +794,11 @@ def build_parser() -> argparse.ArgumentParser:
     _testset(p)
     p = _leaf(g, "script", test_script, "Print the test generation script", output=True)
     _testset(p)
+    p = _leaf(g, "clear-script", test_clear_script, "Clear the generation script (removes generated tests)")
+    _testset(p)
+    p = _leaf(g, "preview", test_preview,
+              "Preview tests (input/answer); missing previews start generating, so repeat later")
+    _testset(p)
     p = _leaf(g, "save-script", test_save_script,
               "Replace the generation script; each line is '<generator> <args> > <index>' or '... > $'")
     p.add_argument("path", help="local script file, or - for stdin")
@@ -615,6 +807,9 @@ def build_parser() -> argparse.ArgumentParser:
     _testset(p)
     p.add_argument("--disable", action="store_true", help="disable instead")
     p = _leaf(g, "enable-points", test_enable_points, "Enable points for the problem")
+    p.add_argument("--disable", action="store_true", help="disable instead")
+    p = _leaf(g, "enable-checker-percent", test_enable_checker_percent,
+              "Treat points returned by the checker as percents (needs points enabled)")
     p.add_argument("--disable", action="store_true", help="disable instead")
     p = _leaf(g, "groups", test_groups, "List test groups")
     _testset(p)
@@ -659,10 +854,11 @@ def build_parser() -> argparse.ArgumentParser:
     g = _group(root, "download", "Download via Polygon web URLs (uses POLYGON_LOGIN/POLYGON_PASSWORD)")
     for name, handler, help_text, url_help in (
         ("package", download_package, "Download a problem package by problem URL",
-         "problem URL, e.g. https://polygon.codeforces.com/p/<owner>/<name>"),
-        ("problem-xml", download_problem_xml, "Download problem.xml", "problem URL"),
+         "problem URL copied from Polygon's problem page, e.g. "
+         "https://polygon.codeforces.com/p85dIBF/mmirzayanov/a-plus-b"),
+        ("problem-xml", download_problem_xml, "Download problem.xml", "problem URL (as for `download package`)"),
         ("contest-xml", download_contest_xml, "Download contest.xml",
-         "contest URL, e.g. https://polygon.codeforces.com/c/<id>/<uid>"),
+         "contest URL with the contest UID, e.g. https://polygon.codeforces.com/c/50431a121273b7e31f4200e7"),
         ("statements-pdf", download_statements_pdf, "Download the contest statements PDF", "contest URL"),
     ):
         p = _leaf(g, name, handler, help_text, problem=False, output=True)
@@ -675,24 +871,57 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "statements-pdf":
             p.add_argument("--lang", default="english", help="statement language (default: english)")
 
+    # polyman directories
+    p = _leaf(root, "sync", sync_dir,
+              "Push a polyman problem directory (Config.json) to Polygon; only differences are written",
+              problem=False)
+    p.add_argument("dir", help="polyman problem directory containing Config.json")
+    p.add_argument("--pin", help="problem PIN, if the problem has one")
+    p.add_argument("--dry-run", action="store_true",
+                   help="read Polygon and print the planned writes without changing anything")
+    p.add_argument("--only", type=sections, metavar="SECTION[,SECTION...]",
+                   help="sync only these sections: " + ", ".join(polyman_sync.SECTIONS))
+    p.add_argument("--prune", action="store_true",
+                   help="delete remote manual tests that Config.json does not have "
+                        "(files, solutions and statements cannot be deleted; they are reported)")
+
+    p = _leaf(root, "pull", pull_dir, "Write a polyman problem directory for an existing problem (read-only)")
+    p.add_argument("dir", help="new or empty directory")
+
     # raw
     p = _leaf(root, "call", raw_call,
               "Call any API method directly, e.g. `call problem.info problemId=123`", problem=False,
               output=True)
     p.add_argument("method", help="API method name, e.g. problem.viewTags")
-    p.add_argument("params", nargs="*", metavar="KEY=VALUE",
-                   help="parameters; KEY=@path sends a file's bytes")
-    p.add_argument("--raw", action="store_true", help="method returns a file, not JSON")
+    p.add_argument("params", nargs="*", type=param, metavar="KEY=VALUE",
+                   help="parameters; KEY=@path sends a file's bytes, KEY=@- reads stdin")
+    p.add_argument("--raw", action="store_true",
+                   help="always return the body as bytes (non-JSON responses are detected anyway)")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _stdin_used
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+    _stdin_used = False
     args = build_parser().parse_args(argv)
     try:
         emit(args.handler(args), args)
+    except Unfinished as exc:
+        emit(exc.result, args)
+        return _fail(args, str(exc), 1)
+    except ConfigError as exc:
+        return _fail(args, str(exc), 1)
+    except argparse.ArgumentTypeError as exc:  # bad local input found while running, e.g. a missing upload file
+        return _fail(args, str(exc), 2)
     except (PolygonError, requests.RequestException, OSError) as exc:
-        message = str(exc)
-        print(json.dumps({"error": message}, ensure_ascii=False) if args.json else f"error: {message}",
-              file=sys.stderr)
-        return 1
+        return _fail(args, str(exc), 1)
     return 0
+
+
+def _fail(args: argparse.Namespace, message: str, status: int) -> int:
+    print(json.dumps({"error": message}, ensure_ascii=False) if args.json else f"error: {message}",
+          file=sys.stderr)
+    return status

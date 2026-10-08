@@ -15,7 +15,7 @@ class ProjectTest(unittest.TestCase):
         self.project = self.pyproject["project"]
 
     def test_console_script_points_to_cli_main(self):
-        target = self.project["scripts"]["cf-polygon"]
+        target = self.project["scripts"]["polygonctl"]
         module, _, attr = target.partition(":")
         self.assertTrue(callable(getattr(importlib.import_module(module), attr)))
 

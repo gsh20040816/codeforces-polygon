@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from cf_polygon import cli
+from codeforces_polygon import cli
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = [ROOT / "README.md", ROOT / "skills" / "polygon" / "SKILL.md"]
@@ -15,7 +15,7 @@ DOCS = [ROOT / "README.md", ROOT / "skills" / "polygon" / "SKILL.md"]
 def examples(path):
     for block in re.findall(r"```bash\n(.*?)```", path.read_text(encoding="utf-8"), re.S):
         for line in block.splitlines():
-            if line.startswith("cf-polygon "):
+            if line.startswith("polygonctl "):
                 tokens = shlex.split(line, comments=True)[1:]
                 if ">" in tokens:  # shell redirection
                     tokens = tokens[:tokens.index(">")]
@@ -23,9 +23,10 @@ def examples(path):
 
 
 class DocExamplesTest(unittest.TestCase):
+    @patch.object(cli, "upload", lambda value: b"")  # don't read @files
+    @patch.object(cli, "text", lambda value: value)
     def test_examples_parse(self):
-        with patch.object(cli, "text", lambda value: value):  # don't read @files
-            parser = cli.build_parser()
+        parser = cli.build_parser()
         count = 0
         for path in DOCS:
             for line, tokens in examples(path):

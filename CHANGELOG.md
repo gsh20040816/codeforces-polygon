@@ -6,7 +6,10 @@
 
 ### Changed
 
-- **不兼容变更**：项目从 MCP 服务改为命令行工具 `cf-polygon`，附带 agent skill（`skills/polygon/SKILL.md`）。不再提供 MCP 接口，也不再依赖 `mcp` 和 `pydantic`。
+- **不兼容变更**：项目从 MCP 服务改为命令行工具 `polygonctl`，附带 agent skill（`skills/polygon/SKILL.md`）。不再提供 MCP 接口，也不再依赖 `mcp` 和 `pydantic`。
+- **改名**：PyPI 包名 `cf-polygon-mcp` → `codeforces-polygon`，命令 `polygonctl`，Python 模块 `codeforces_polygon`。仓库地址改为 https://github.com/gsh20040816/codeforces-polygon（安装：`uv tool install git+https://github.com/gsh20040816/codeforces-polygon`）。
+- 退出码统一：本地输入有问题（`call` 参数不是 `KEY=VALUE`、`@file` 或上传文件不存在、同一条命令里两次用 `@-`）一律退出码 2，之前有的是 1。
+- `call` 和其他命令遇到不是 JSON 状态包的成功响应时直接返回原始内容，忘了加 `--raw` 也能下载文件；响应体是标量 JSON（比如 `5`）时不再抛 AttributeError。
 - 架构变成三层：`client.py`（签名 + 请求）、`cli.py`（命令定义）、`workflow.py`（自检和构建等待）。删除了 `polygon/api/*` 里每个 API 一个文件的封装、`ProblemSession`、MCP 统一返回结构，以及工具注册表和启动时的自检。
 - 所有 API 请求都改为签名后的 multipart POST，签名按字节计算，所以题面图片等二进制文件也能上传。
 - 错误不再包进返回结构：报错信息写到 stderr，退出码为 1；测试输入生成失败时，Polygon 返回的信息（包括出错的输入）会直接显示在错误里。
@@ -27,12 +30,24 @@
 
 ### Added
 
+- `sync <dir>`：读 polyman 题目目录的 `Config.json`，先对比远程现状再只推送有差别的部分（幂等），支持 `--dry-run`、`--json`（每步一条记录）、`--only`、`--prune`；第一次运行会建题并把 `problemId` 写回 `Config.json`。复现 polyman 的测试编号（`$`、`{1-3}`、`<#-- @group X -->`）和生成器名改写，并补上 polyman `remote push` 漏掉的测试组 policy、`pointsEnabled`、题目级 tutorial、无 index 的 checker 测试和 interactor（扩展字段）。任一步失败退出码为 1。
+- `pull <id> <dir>`：为已有题目生成 polyman 格式目录。
+- `access list|set`、`note show|set`、`issue list|add|update`、`material list|set|remove`：对应 `problem.accesses`、`setAccess`、`note`、`saveNote`、`issues`、`addIssue`、`updateIssue`、`materials`、`setMaterial`。
+- `statement render`（`problem.renderStatements`，`--save-dir` 保存 HTML/PDF）、`test clear-script`、`test preview`、`test enable-checker-percent`。
+- 解的标签补上 `TM`、`NR`；`solution extra-tag --tag` 不再接受 `MA`。
 - `problem cautions`：查看 Polygon 自带的 cautions 和 package 就绪问题（`problem.cautions`）。
 - `call`：直接调用任意 Polygon API 方法（`KEY=@path` 会上传文件内容）。
 - `test delete` 支持一次删除多个测试（`testIndices`）。
 - `statement view-resource`：下载题面资源文件（`problem.viewStatementResource`）。
 
-### Fixed（真实 Polygon 冒烟测试中发现）
+### Fixed（真实 Polygon 冒烟测试和 Review 中发现）
+
+- `problem commit` 遇到 `conflictOccurred` 时退出码为 1；`committed: false` 加 "No changes" 仍是正常结果。
+- `package build --wait` 轮询时遇到网络错误或 5xx 会继续等，不会让调用方以为失败而重复构建；超时提示里写明构建已开始，应该用 `package list` 查看。
+- 同一条命令里第二次用 `@-` 会报错，不再读到空串把题面清空。
+- stdout/stderr 不是 UTF-8 时输出俄文或中文不再抛 traceback。
+- `problem check` 不再把每个生成测试都报成“和当前脚本对不上”（Polygon 的 `scriptLine` 不带 `> 目标`）。
+- `download` 组的 URL 示例改成和官方文档一致的格式。
 
 - `problem set-tags` 不带参数时改为发送 `,`：Polygon 不接受空值，`,` 才能清空标签。
 - `problem check` 不再把 `std::wcmp.cpp` 这类标准 checker 当成缺失的源文件，也不再为它们提示缺少 checker 测试。

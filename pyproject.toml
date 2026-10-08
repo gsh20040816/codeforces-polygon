@@ -1,5 +1,5 @@
 [project]
-name = "cf-polygon-mcp"
+name = "codeforces-polygon"
 version = "1.0.0.dev0"
 description = "Codeforces Polygon API 命令行客户端（面向 agent），附带 agent skill"
 readme = "README.md"
@@ -9,8 +9,13 @@ dependencies = [
     "requests>=2.32.3",
 ]
 
+[project.urls]
+Homepage = "https://github.com/gsh20040816/codeforces-polygon"
+Repository = "https://github.com/gsh20040816/codeforces-polygon"
+Changelog = "https://github.com/gsh20040816/codeforces-polygon/blob/main/CHANGELOG.md"
+
 [project.scripts]
-cf-polygon = "cf_polygon.cli:main"
+polygonctl = "codeforces_polygon.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

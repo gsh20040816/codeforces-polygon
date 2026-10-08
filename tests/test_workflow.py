@@ -1,8 +1,10 @@
 import copy
 import unittest
 
-from cf_polygon.client import PolygonError
-from cf_polygon.workflow import build_package_and_wait, check_problem
+import requests
+
+from codeforces_polygon.client import PolygonError
+from codeforces_polygon.workflow import build_package_and_wait, check_problem
 
 
 class FakePolygon:
@@ -171,6 +173,40 @@ class BuildPackageAndWaitTest(unittest.TestCase):
         api = self.polygon([], [{"id": 3, "state": "FAILED", "comment": "Solution wa.cpp passed all tests"}])
         with self.assertRaisesRegex(PolygonError, "package 3 FAILED: Solution wa.cpp passed all tests"):
             self.run_wait(api)
+
+    def test_poll_errors_keep_waiting_without_rebuilding(self):
+        replies = iter([[], requests.ConnectionError("reset"), PolygonError("HTTP 502", 502),
+                        [{"id": 4, "state": "READY"}]])
+
+        def packages(**_):
+            reply = next(replies)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        api = FakePolygon({"problem.packages": packages, "problem.buildPackage": None})
+        self.assertEqual(self.run_wait(api)["id"], 4)
+        self.assertEqual([m for m, _ in api.calls].count("problem.buildPackage"), 1)
+
+    def test_poll_client_errors_still_raise(self):
+        def packages(**_):
+            if api.calls[-1:] and len(api.calls) > 2:
+                raise PolygonError("problemId: Problem not found", 400)
+            return []
+
+        api = FakePolygon({"problem.packages": packages, "problem.buildPackage": None})
+        with self.assertRaisesRegex(PolygonError, "not found"):
+            self.run_wait(api)
+
+    def test_timeout_after_poll_errors_says_build_started(self):
+        def packages(**_):
+            if len(api.calls) > 2:
+                raise requests.Timeout("slow")
+            return []
+
+        api = FakePolygon({"problem.packages": packages, "problem.buildPackage": None})
+        with self.assertRaisesRegex(PolygonError, "last poll failed: slow.*do not|instead of building again"):
+            self.run_wait(api, timeout=12)
 
     def test_timeout(self):
         api = self.polygon([], *([[{"id": 3, "state": "PENDING"}]] * 10))
