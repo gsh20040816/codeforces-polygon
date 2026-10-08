@@ -23,8 +23,7 @@ def examples(path):
 
 
 class DocExamplesTest(unittest.TestCase):
-    @patch.object(cli, "upload", lambda value: b"")  # don't read @files
-    @patch.object(cli, "text", lambda value: value)
+    @patch.object(cli, "read_bytes", lambda path: b"")  # don't read files or stdin
     def test_examples_parse(self):
         parser = cli.build_parser()
         count = 0
@@ -36,6 +35,8 @@ class DocExamplesTest(unittest.TestCase):
                         continue
                     args = parser.parse_args(tokens)
                     self.assertTrue(callable(args.handler))
+                    if hasattr(args, "yes"):  # examples must be runnable as written
+                        self.assertTrue(args.yes, "needs --yes")
         self.assertGreater(count, 40)
 
     def test_skill_frontmatter(self):

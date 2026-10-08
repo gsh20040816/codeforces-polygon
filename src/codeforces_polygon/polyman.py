@@ -246,8 +246,6 @@ def resolve_tests(problem: Problem, testset: dict) -> list[Test]:
             raise ConfigError(f"manual test index must be >= 1: {manual['input']}")
         if index in used:
             raise ConfigError(f"duplicate test index {index} (manual: {manual['input']})")
-        if not (problem.root / manual["input"]).is_file():
-            raise ConfigError(f"manual test input not found: {manual['input']}")
         used.add(index)
         tests.append(Test(index, True, manual.get("group"), manual.get("points"),
                           manual.get("useInStatements"), input_path=manual["input"]))

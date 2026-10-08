@@ -8,8 +8,10 @@
 
 - **不兼容变更**：项目从 MCP 服务改为命令行工具 `polygonctl`，附带 agent skill（`skills/polygon/SKILL.md`）。不再提供 MCP 接口，也不再依赖 `mcp` 和 `pydantic`。
 - **改名**：PyPI 包名 `cf-polygon-mcp` → `codeforces-polygon`，命令 `polygonctl`，Python 模块 `codeforces_polygon`。仓库地址改为 https://github.com/gsh20040816/codeforces-polygon（安装：`uv tool install git+https://github.com/gsh20040816/codeforces-polygon`）。
-- 退出码统一：本地输入有问题（`call` 参数不是 `KEY=VALUE`、`@file` 或上传文件不存在、同一条命令里两次用 `@-`）一律退出码 2，之前有的是 1。
-- `call` 和其他命令遇到不是 JSON 状态包的成功响应时直接返回原始内容，忘了加 `--raw` 也能下载文件；响应体是标量 JSON（比如 `5`）时不再抛 AttributeError。
+- 命令行约定（POSIX/GNU 风格）：结果只写 stdout，错误和诊断写 stderr；退出码 `0` 成功、`1` 命令失败、`2` 用法错误（未知选项、命令行里给的文件不存在或读不了、stdin 用了两次、缺 `--yes` 等）。`push --dry-run` 和真跑的退出码含义相同。
+- 文本参数不再用自造的 `@file` / `@-` 语法：`--X TEXT` 按字面发送，`--X-file PATH` 从 UTF-8 文件读（`-` 表示 stdin）；位置参数形式的文本（`problem set-description`、`problem set-tutorial`、`note set`）用 `TEXT` 或 `--file PATH`。`call` 的参数一律按字面发送，文件用 `--file KEY=PATH`。
+- 会删除东西或通知别人的命令需要 `-y`/`--yes`：`problem discard-working-copy`、`test delete`、`test clear-script`、`material remove`、`issue add`、`issue update`、`access set`。
+- `call` 不加 `--raw` 时按响应体判断：是 JSON 状态包就解析，否则（HTTP 200）原样返回内容，忘了加 `--raw` 也能下载文件；响应体是标量 JSON（比如 `5`）时不再抛 AttributeError。其他命令收到不是 JSON 状态包的 200 响应（维护页、代理页）一律报错，不会当成结果。
 - 架构变成三层：`client.py`（签名 + 请求）、`cli.py`（命令定义）、`workflow.py`（自检和构建等待）。删除了 `polygon/api/*` 里每个 API 一个文件的封装、`ProblemSession`、MCP 统一返回结构，以及工具注册表和启动时的自检。
 - 所有 API 请求都改为签名后的 multipart POST，签名按字节计算，所以题面图片等二进制文件也能上传。
 - 错误不再包进返回结构：报错信息写到 stderr，退出码为 1；测试输入生成失败时，Polygon 返回的信息（包括出错的输入）会直接显示在错误里。
@@ -21,7 +23,7 @@
   - `get_problem_files` / `view_problem_file` / `save_problem_file` → `file list|view|upload`
   - `get_problem_solutions` / `view_problem_solution` / `save_problem_solution` / `edit_problem_solution_extra_tags` → `solution list|view|upload|extra-tag`
   - validator、checker、interactor 的读取和设置，以及 validator/checker 测试 → `validator|checker|interactor show|set|tests|save-test`，额外 validator 用 `validator extra`
-  - 测试、脚本、测试组、计分相关工具 → `test list|input|answer|save|delete|script|save-script|groups|save-group|set-group|enable-groups|enable-points`
+  - 测试、脚本、测试组、计分相关工具 → `test list|input|answer|save|delete|script|save-script|groups|set-group-policy|assign-group|enable-groups|disable-groups|enable-points|disable-points`
   - `get_problem_packages` / `download_problem_package` / `build_problem_package` / `build_problem_package_and_wait` → `package list|download|build [--wait]`
   - `check_problem_readiness` → `problem check`（检查项精简了，只输出 errors 和 warnings）
   - `get_contest_problems` → `contest problems`
@@ -30,13 +32,13 @@
 
 ### Added
 
-- `sync <dir>`：读 polyman 题目目录的 `Config.json`，先对比远程现状再只推送有差别的部分（幂等），支持 `--dry-run`、`--json`（每步一条记录）、`--only`、`--prune`；第一次运行会建题并把 `problemId` 写回 `Config.json`。复现 polyman 的测试编号（`$`、`{1-3}`、`<#-- @group X -->`）和生成器名改写，并补上 polyman `remote push` 漏掉的测试组 policy、`pointsEnabled`、题目级 tutorial、无 index 的 checker 测试和 interactor（扩展字段）。任一步失败退出码为 1。
-- `pull <id> <dir>`：为已有题目生成 polyman 格式目录。
-- `access list|set`、`note show|set`、`issue list|add|update`、`material list|set|remove`：对应 `problem.accesses`、`setAccess`、`note`、`saveNote`、`issues`、`addIssue`、`updateIssue`、`materials`、`setMaterial`。
-- `statement render`（`problem.renderStatements`，`--save-dir` 保存 HTML/PDF）、`test clear-script`、`test preview`、`test enable-checker-percent`。
+- `push <dir>`：把 polyman 题目目录单向推到 Polygon 的工作副本（从不 commit）。读 `Config.json`，先对比远程现状再只推送有差别的部分，支持 `-n`/`--dry-run`、`--json`（每步一条记录）、`--only`、`--delete-extra-tests`；第一次运行会建题并把 `problemId` 写回 `Config.json`。复现 polyman 的测试编号（`$`、`{1-3}`、`<#-- @group X -->`）和生成器名改写，并补上 polyman `remote push` 漏掉的测试组 policy、`pointsEnabled`、题目级 tutorial、无 index 的 checker 测试和 interactor（扩展字段）。远程生成测试的编号或命令和按 polyman 算出的不一致时（比如增删了手工测试），即使脚本文本没变也会重新保存脚本，之后再核对一次。上传的脚本去掉了注释（Polygon 遇到 FreeMarker 注释就只接受 `$` 编号，polyman 模板的注释头加上 `> N` 会被拒）。`--delete-extra-tests` 只在 testset 写了 `manualTests` 键时才删除（键缺失不删，只给 warning）；没加它而远程多余的手工测试占着脚本要用的编号时，在写入之前就报失败。手工测试输入和脚本按 Polygon 的规范化方式比较。任一步失败退出码为 1，`--dry-run` 也一样。
+- `pull <id> <dir>`：为已有题目生成 polyman 格式目录（只读 Polygon）；能用 `<#-- @group -->` 表达时补上生成测试的分组头。
+- `access list|set`、`note show|set`、`issue list|add|update`（add/update 会像网页一样发邮件通知，需要 `--yes`）、`material list|set|remove`：对应 `problem.accesses`、`setAccess`、`note`、`saveNote`、`issues`、`addIssue`、`updateIssue`、`materials`、`setMaterial`。
+- `statement render`（`problem.renderStatements`，`--save-dir` 保存 HTML/PDF；有渲染失败时打印结果并退出码 1）、`test clear-script`、`test preview`、`test enable-checker-percent|disable-checker-percent`。
 - 解的标签补上 `TM`、`NR`；`solution extra-tag --tag` 不再接受 `MA`。
 - `problem cautions`：查看 Polygon 自带的 cautions 和 package 就绪问题（`problem.cautions`）。
-- `call`：直接调用任意 Polygon API 方法（`KEY=@path` 会上传文件内容）。
+- `call`：直接调用任意 Polygon API 方法（`KEY=VALUE` 按字面发送，`--file KEY=PATH` 上传文件内容）。
 - `test delete` 支持一次删除多个测试（`testIndices`）。
 - `statement view-resource`：下载题面资源文件（`problem.viewStatementResource`）。
 
@@ -44,16 +46,16 @@
 
 - `problem commit` 遇到 `conflictOccurred` 时退出码为 1；`committed: false` 加 "No changes" 仍是正常结果。
 - `package build --wait` 轮询时遇到网络错误或 5xx 会继续等，不会让调用方以为失败而重复构建；超时提示里写明构建已开始，应该用 `package list` 查看。
-- 同一条命令里第二次用 `@-` 会报错，不再读到空串把题面清空。
+- 同一条命令里第二次读 stdin（`-`）会报错，不再读到空串把题面清空。
 - stdout/stderr 不是 UTF-8 时输出俄文或中文不再抛 traceback。
 - `problem check` 不再把每个生成测试都报成“和当前脚本对不上”（Polygon 的 `scriptLine` 不带 `> 目标`）。
 - `download` 组的 URL 示例改成和官方文档一致的格式。
 
-- `problem set-tags` 不带参数时改为发送 `,`：Polygon 不接受空值，`,` 才能清空标签。
+- `problem set-tags --clear` 发送 `,`：Polygon 不接受空值，`,` 才能清空标签。不带标签也不带 `--clear` 是用法错误。
 - `problem check` 不再把 `std::wcmp.cpp` 这类标准 checker 当成缺失的源文件，也不再为它们提示缺少 checker 测试。
 - `problem check` 把 Polygon 在未设置 checker 时返回的 `std::none` 当作「未设置」。
-- `@file` / `@-` 读取文本时不再做换行转换，CRLF 原样发送。
-- 修正 `test save-group` 的说明：测试组需要先通过分配测试创建，`save-group` 只修改已有组的策略和依赖。
+- 从文件读文本（`--X-file`）时不做换行转换，CRLF 原样发送。
+- 修正测试组的说明：测试组需要先通过分配测试（`test assign-group` / `test save --group`）创建，`test set-group-policy` 只修改已有组的策略和依赖。
 
 ### Removed
 

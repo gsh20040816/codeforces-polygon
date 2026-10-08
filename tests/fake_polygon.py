@@ -4,7 +4,10 @@ Behaviors copied from runs against polygon.codeforces.com: text comes back with 
 scripts lose blank lines, ``$`` takes the smallest index not used by manual tests,
 a script's tests replace the old generated ones, groups exist only while a test is
 in them, ``viewTestGroup`` fails while groups are disabled, tests carry ``points``
-only while points are enabled, and ``problem.interactor`` fails on non-interactive problems.
+only while points are enabled, ``problem.interactor`` fails on non-interactive problems,
+a script with FreeMarker (even just a comment) takes only ``$`` targets,
+manual test inputs are normalized (blanks collapsed, ends trimmed, one EOL added), and
+``deleteTest`` leaves the other tests at their indices (holes are allowed).
 """
 
 import base64
@@ -35,6 +38,7 @@ class FakePolygon:
         self.groups_enabled = self.points_enabled = False
         self.policies = {}
         self.fail = {}  # method -> message, to inject errors
+        self.script_shift = 0  # number generated tests differently from polyman (a hypothetical Polygon)
 
     @property
     def writes(self):
@@ -176,6 +180,8 @@ class FakePolygon:
 
     def api_saveScript(self, testset, source):
         lines = parse_script(text(source))
+        if "<#" in text(source) and any(line.indices is not None for line in lines):
+            raise PolygonError("source: When using Freemarker it is only allowed to use $ as a test index.")
         self.api_clearScript(testset)
         used, next_free = set(self.tests), 1
         for line in lines:
@@ -185,12 +191,17 @@ class FakePolygon:
                 indices = [next_free]
             else:
                 indices = line.indices
+            indices = [i + self.script_shift for i in indices]
             for index in indices:
                 if index in self.tests:
                     raise PolygonError(f"source: test {index} already exists")
                 used.add(index)
                 self.tests[index] = {"manual": False, "line": " ".join([line.generator] + line.args)}
-        self.script = "\r\n".join(l for l in text(source).replace("\r\n", "\n").split("\n") if l.strip()) + "\r\n"
+        lines = [l for l in text(source).replace("\r\n", "\n").split("\n") if l.strip()]
+        if "<#" not in text(source):  # without FreeMarker Polygon also collapses blanks (and keeps LF)
+            self.script = "\n".join(" ".join(l.split()) for l in lines) + "\n"
+        else:
+            self.script = "\r\n".join(lines) + "\r\n"
 
     def api_clearScript(self, testset):
         self.tests = {i: t for i, t in self.tests.items() if t["manual"]}
@@ -205,7 +216,8 @@ class FakePolygon:
             raise PolygonError("testGroup: groups are disabled")
         t = self.tests.setdefault(testIndex, {"manual": True})
         if testInput is not None:
-            t["input"] = text(testInput)
+            lines = [" ".join(line.split()) for line in text(testInput).replace("\r\n", "\n").split("\n")]
+            t["input"] = "\n".join(lines).strip("\n") + "\n"
         if testGroup is not None:
             t["group"] = testGroup
         if testPoints is not None:

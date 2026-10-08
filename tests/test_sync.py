@@ -12,7 +12,7 @@ from unittest.mock import patch
 from codeforces_polygon import cli
 from codeforces_polygon.client import Polygon
 from codeforces_polygon.polyman import ConfigError, Problem
-from codeforces_polygon.sync import Sync, pull, source_type
+from codeforces_polygon.sync import Sync, polygon_script, pull, source_type
 
 try:
     from .fake_polygon import FakePolygon
@@ -92,6 +92,13 @@ class SyncHelpersTest(unittest.TestCase):
         self.assertEqual(source_type("java.21"), "java21")
         self.assertEqual(source_type("cpp.g++17"), "cpp.g++17")
         self.assertIsNone(source_type(None))
+
+    def test_uploaded_script_drops_comments_unless_it_uses_freemarker(self):
+        gens = [{"name": "gen-random", "source": "generators/gen.cpp"}]
+        self.assertEqual(polygon_script("<#-- @group main -->\ngen-random 1 > 6 <#-- big -->\n", gens),
+                         "\ngen 1 > 6 \n")
+        listed = "<#-- x -->\n<#list 1..2 as i>\ngen-random ${i} > $\n</#list>\n"
+        self.assertEqual(polygon_script(listed, gens), listed.replace("gen-random", "gen"))
 
 
 class SyncTestCase(unittest.TestCase):
@@ -194,6 +201,20 @@ class ChangeTest(SyncTestCase):
         self.assertEqual(fake.tags, ["math"])  # sections before and after still ran
         self.assertIn(2, fake.tests)
 
+    def test_config_field_errors_are_failed_steps(self):
+        edit_config(self.root, lambda c: c["generators"][0].pop("source"))
+        fake, result = run(self.root)
+        self.assertFalse(result["ok"])
+        self.assertIn(("generators", "gen-random", "failed"), steps(result))
+        self.assertIn("Config.json: KeyError('source')", json.dumps(result))
+        self.assertIn("main.cpp", fake.solutions)  # later sections still ran
+
+    def test_problem_id_write_failure_names_the_new_problem(self):
+        with patch.object(Problem, "save_problem_id", side_effect=OSError("read-only file system")):
+            _, result = run(self.root)
+        self.assertFalse(result["ok"])
+        self.assertIn('add \\"problemId\\": 501 by hand', json.dumps(result))
+
     def test_missing_statement_file_fails_that_language_only(self):
         (self.root / "statements" / "english" / "legend.tex").unlink()
         fake, result = run(self.root)
@@ -285,13 +306,94 @@ class TestsetTest(SyncTestCase):
         run(self.root, fake)
         self.assertEqual(fake.writes, [])
 
+    def test_script_blanks_do_not_count_as_a_change(self):
+        fake = self.synced()
+        (self.root / "generators" / "script.txt").write_text(
+            "<#-- @group main -->\n\ngen-random   10  >  $\n", encoding="utf-8")
+        run(self.root, fake)
+        self.assertEqual(fake.writes, [])
+
     def test_numbering_mismatch_is_a_failure(self):
         fake = self.synced()
-        fake.tests[2]["line"] = "gen 11"  # Polygon disagrees with what the script says
-        fake.script = fake.script  # unchanged script, so no reset
+        fake.script_shift = 10  # Polygon numbers the new script differently from polyman
+        (self.root / "generators" / "script.txt").write_text("<#-- @group main -->\ngen-random 11 > $\n",
+                                                            encoding="utf-8")
         _, result = run(self.root, fake, only=["tests"])
         self.assertFalse(result["ok"])
         self.assertIn("numbered the generated tests differently", json.dumps(result))
+
+    def test_failed_script_save_is_the_only_error(self):
+        fake = self.synced()
+        fake.fail["problem.saveScript"] = "source: boom"
+        (self.root / "generators" / "script.txt").write_text("<#-- @group main -->\ngen-random 11 > $\n",
+                                                            encoding="utf-8")
+        _, result = run(self.root, fake, only=["tests"])
+        self.assertEqual(steps(result, "failed"), [("tests", "tests: script", "failed")])
+
+    def dollar_problem(self):
+        """Manual tests 1-3 and a script `$`, `$`, `> 6`: generated tests land on 4, 5, 6."""
+        for i in (2, 3):
+            (self.root / "manual" / f"s{i}.in").write_text(f"{i}\n", encoding="utf-8")
+        (self.root / "generators" / "script.txt").write_text(
+            "<#-- @group main -->\ngen-random 1 > $\ngen-random 2 > $\ngen-random 3 > 6\n", encoding="utf-8")
+        edit_config(self.root, lambda c: c["testsets"][0]["manualTests"].extend(
+            [{"input": "manual/s2.in", "index": 2}, {"input": "manual/s3.in", "index": 3}]))
+        fake = self.synced()
+        self.assertEqual(sorted(i for i, t in fake.tests.items() if not t["manual"]), [4, 5, 6])
+        edit_config(self.root, lambda c: c["testsets"][0]["manualTests"].pop(1))  # drop manual test 2
+        return fake
+
+    def test_deleting_a_manual_test_renumbers_dollar_tests_and_converges(self):
+        fake = self.dollar_problem()
+        _, plan = run(self.root, fake, dry_run=True, prune=True)
+        self.assertTrue(plan["ok"], steps(plan, "failed"))
+        self.assertEqual([s["method"] for s in plan["steps"] if s["status"] == "planned"],
+                         ["problem.clearScript", "problem.deleteTest", "problem.saveScript", "problem.setTestGroup",
+                          "problem.saveTestGroup"])  # clearing the script drops group main and its policy
+        self.assertEqual(fake.writes, [])
+        _, result = run(self.root, fake, prune=True)
+        self.assertTrue(result["ok"], steps(result, "failed"))
+        self.assertEqual({i: t["manual"] for i, t in fake.tests.items()},
+                         {1: True, 2: False, 3: True, 4: False, 6: False})
+        self.assertEqual(fake.policies["main"]["feedbackPolicy"], "ICPC")
+        fake.calls.clear()
+        _, again = run(self.root, fake, prune=True)
+        self.assertTrue(again["ok"], steps(again, "failed"))
+        self.assertEqual(fake.writes, [])
+
+    def test_unpruned_manual_test_in_the_way_fails_before_writing(self):
+        fake = self.dollar_problem()
+        for options in ({}, {"dry_run": True}):
+            _, result = run(self.root, fake, **options)
+            self.assertFalse(result["ok"])
+            self.assertIn("remote manual tests [2] sit where the script puts generated tests", json.dumps(result))
+            self.assertEqual(fake.writes, [])
+
+    def test_prune_without_a_manual_tests_key_deletes_nothing(self):
+        fake = self.synced()
+        edit_config(self.root, lambda c: c["testsets"][0].pop("manualTests"))
+        _, result = run(self.root, fake, only=["tests"], prune=True)
+        self.assertIn('not pruning: the testset has no \\"manualTests\\" key', json.dumps(result))
+        self.assertNotIn("problem.deleteTest", fake.writes)
+        self.assertTrue(fake.tests[1]["manual"])
+
+    def test_manual_input_is_compared_as_polygon_normalizes_it(self):
+        fake = self.synced()
+        (self.root / "manual" / "s1.in").write_text("\n 1   \n\n", encoding="utf-8")
+        _, result = run(self.root, fake, only=["tests"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(fake.writes, [])
+        (self.root / "manual" / "s1.in").write_text("1 2", encoding="utf-8")
+        run(self.root, fake, only=["tests"])
+        self.assertEqual(fake.writes, ["problem.saveTest"])
+
+    def test_points_read_failure_is_a_failed_step(self):
+        fake = self.synced()
+        fake.fail["problem.tests"] = "testset: boom"
+        _, result = run(self.root, fake, only=["tests"])
+        self.assertFalse(result["ok"])
+        self.assertIn(("tests", "points", "failed"), steps(result))
+        self.assertEqual(fake.writes, [])
 
     def test_groups_and_points_state_is_read_back(self):
         fake = self.synced()
@@ -312,10 +414,28 @@ class PullTest(SyncTestCase):
             self.assertEqual(config["generators"], [{"name": "gen", "source": "./generators/gen.cpp",
                                                      "sourceType": "cpp.g++17"}])
             self.assertEqual(config["testsets"][0]["manualTests"][0]["index"], 1)
+            # Polygon got the script without comments; pull puts the @group headers back
+            self.assertEqual((target / "generators" / "gen-script.txt").read_text(encoding="utf-8"),
+                             "<#-- @group main -->\ngen 10 > $\n")
+            self.assertEqual(summary["warnings"], [])
             fake.calls.clear()
             _, result = run(target, fake)
             self.assertTrue(result["ok"], steps(result, "failed"))
             self.assertEqual(fake.writes, [])
+
+    def test_pull_only_treats_disabled_groups_as_disabled(self):
+        fake = self.synced()
+        fake.fail["problem.viewTestGroup"] = "Access denied"
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(Exception, "Access denied"):
+            pull(fake, 501, str(Path(tmp, "pulled")))
+
+    def test_pull_warns_when_headers_cannot_express_the_groups(self):
+        fake = self.synced()
+        fake.api_saveScript("tests", "gen 1 > $\ngen 2 > $\n")
+        fake.api_setTestGroup("tests", "main", "2")  # test 3 stays ungrouped after a grouped one
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = pull(fake, 501, str(Path(tmp, "pulled")))
+        self.assertIn("cannot express", " ".join(summary["warnings"]))
 
     def test_pull_refuses_a_non_empty_directory(self):
         with self.assertRaisesRegex(ConfigError, "not empty"):
@@ -336,23 +456,40 @@ class CommandTest(SyncTestCase):
 
     def test_json_result_and_exit_codes(self):
         fake = FakePolygon()
-        code, out, _ = self.cli(["sync", str(self.root), "--json"], fake)
+        code, out, _ = self.cli(["push", str(self.root), "--json"], fake)
         self.assertEqual(code, 0)
         self.assertTrue(json.loads(out)["ok"])
         fake.fail["problem.saveTags"] = "tags: boom"
         fake.tags = []
-        code, out, err = self.cli(["sync", str(self.root), "--json", "--only", "tags"], fake)
+        code, out, err = self.cli(["push", str(self.root), "--json", "--only", "tags"], fake)
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(out)["steps"][-1]["status"], "failed")
         self.assertIn("tags: boom", json.loads(err)["error"])
 
+    def test_dry_run_has_the_same_exit_status(self):
+        (self.root / "statements" / "english" / "legend.tex").unlink()
+        for extra in ([], ["-n"]):
+            code, out, err = self.cli(["push", str(self.root), "--json", *extra], FakePolygon())
+            self.assertEqual(code, 1, extra)
+            self.assertIn("english", json.loads(err)["error"])
+            self.assertFalse(json.loads(out)["ok"])
+
+    def test_delete_extra_tests_option(self):
+        fake = FakePolygon()
+        self.assertEqual(self.cli(["push", str(self.root)], fake)[0], 0)
+        fake.tests[7] = {"manual": True, "input": "x\n"}
+        code, _, _ = self.cli(["push", str(self.root), "--only", "tests", "--delete-extra-tests"], fake)
+        self.assertEqual(code, 0)
+        self.assertNotIn(7, fake.tests)
+        self.assertEqual(self.cli(["push", str(self.root), "--prune"], fake)[0], 2)  # old spelling is gone
+
     def test_unknown_section_is_usage_error(self):
-        code, _, err = self.cli(["sync", str(self.root), "--only", "tags,bogus"], FakePolygon())
+        code, _, err = self.cli(["push", str(self.root), "--only", "tags,bogus"], FakePolygon())
         self.assertEqual(code, 2)
         self.assertIn("bogus", err)
 
     def test_missing_config_exits_1(self):
-        code, _, err = self.cli(["sync", self.tmp.name + "/nope"], FakePolygon())
+        code, _, err = self.cli(["push", self.tmp.name + "/nope"], FakePolygon())
         self.assertEqual(code, 1)
         self.assertIn("Config.json", err)
 

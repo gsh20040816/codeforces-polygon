@@ -1,8 +1,8 @@
-"""``polygonctl sync``: push a polyman problem directory to Polygon, idempotently.
+"""``polygonctl push``: push a polyman problem directory to Polygon, one way.
 
 Every section reads the remote state first and only writes what differs, so a
 second run reports everything as ``unchanged``.  Each write is one step in the
-result; a failed step does not stop the others, but makes the sync fail.
+result; a failed step does not stop the others, but makes the push fail.
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ from typing import Any, Callable
 import requests
 
 from .client import Polygon, PolygonError
-from .polyman import ConfigError, Problem, Test, basename, lf, numbered, resolve_tests, script_text, \
-    stem, to_polygon_script, tokenize
+from .polyman import COMMENT_RE, ConfigError, Problem, Test, basename, lf, numbered, parse_script, \
+    resolve_tests, script_text, stem, to_polygon_script, tokenize
 
 SECTIONS = ("info", "tags", "description", "tutorial", "statements", "generators", "validator",
             "checker", "interactor", "solutions", "tests")
@@ -31,9 +31,27 @@ def _same(a: Any, b: Any) -> bool:
     return lf(a or "").rstrip() == lf(b or "").rstrip()
 
 
+def _test_input(text: str) -> str:
+    """A manual test input as Polygon stores it: runs of blanks inside a line become one space,
+    line ends and leading/trailing blank lines are trimmed, and one EOL is added (verified live)."""
+    lines = [" ".join(line.split()) for line in lf(text).split("\n")]
+    return "\n".join(lines).strip("\n") + "\n"
+
+
+def polygon_script(script: str, generators: list[dict]) -> str:
+    """The script as uploaded: generator names swapped for file stems and, unless the script uses
+    other FreeMarker, comments removed.  Polygon treats any ``<#-- -->`` as FreeMarker and then
+    accepts only ``$`` targets ("When using Freemarker it is only allowed to use $ as a test
+    index"); the comments, ``@group`` headers included, mean nothing to Polygon."""
+    script = to_polygon_script(script, generators)
+    without = COMMENT_RE.sub("", script)
+    return script if "<#" in without or "${" in without else without
+
+
 def _script_lines(script: str) -> list[str]:
-    """Polygon drops blank lines and stores CRLF when it saves a script."""
-    return [line.rstrip() for line in lf(script).split("\n") if line.strip()]
+    """Compare scripts the way Polygon stores them: it drops blank lines and, for scripts
+    without FreeMarker, collapses runs of blanks (verified live)."""
+    return [" ".join(line.split()) for line in lf(script).split("\n") if line.strip()]
 
 
 def source_type(value: str | None) -> str | None:
@@ -104,6 +122,8 @@ class Sync:
             fn()
         except ConfigError as exc:
             self.fail(section, target, str(exc))
+        except (KeyError, TypeError) as exc:  # a missing or mistyped Config.json field
+            self.fail(section, target, f"Config.json: {exc!r}")
         except (PolygonError, requests.RequestException) as exc:
             self.fail(section, target, f"reading remote state: {exc}")
 
@@ -139,7 +159,14 @@ class Sync:
             self.record("problem", name, "create", "failed", "problem.create", str(exc))
             return
         self.problem_id = created["id"]
-        self.problem.save_problem_id(self.problem_id)
+        try:
+            self.problem.save_problem_id(self.problem_id)
+        except (OSError, ConfigError) as exc:
+            self.record("problem", name, "create", "failed", "problem.create",
+                        f"created problem {self.problem_id} but could not write it to Config.json ({exc}); "
+                        f'add "problemId": {self.problem_id} by hand before re-running, or a second problem '
+                        "is created")
+            return
         self.record("problem", name, "create", "ok", "problem.create",
                     f"created problem {self.problem_id}; problemId written to Config.json")
 
@@ -228,13 +255,8 @@ class Sync:
                    kind, type="source", name=name, file=content.encode(), sourceType=kind)
         return name
 
-    def role(self, section: str, view: str, save: str, param: str, name: str) -> None:
-        try:
-            current = self.read(view, "")
-        except PolygonError as exc:
-            if "not interactive" not in str(exc):  # problem.interactor before interactive=true lands
-                raise
-            current = ""
+    def role(self, section: str, view: str, save: str, param: str, name: str, readable: bool = True) -> None:
+        current = self.read(view, "") if readable else ""
         if current == name:
             return self.unchanged(section, f"{section} = {name}")
         self.write(section, f"{section} = {name}", "update", save, **{param: name})
@@ -313,7 +335,9 @@ class Sync:
                                                       "Config.json; upload and set one")
             return
         name = self.source("interactor", interactor["source"], interactor.get("sourceType"))
-        self.role("interactor", "problem.interactor", "problem.setInteractor", "interactor", name)
+        # problem.interactor fails until the problem is interactive (in a dry run that may still be planned)
+        self.role("interactor", "problem.interactor", "problem.setInteractor", "interactor", name,
+                  readable=bool(self.read("problem.info", {}).get("interactive")))
 
     def sync_solutions(self) -> None:
         solutions = self.config.get("solutions") or []
@@ -342,36 +366,33 @@ class Sync:
     def sync_tests(self) -> None:
         testsets = self.config.get("testsets") or []
         if any("pointsEnabled" in ts for ts in testsets):
-            enabled = any(ts.get("pointsEnabled") for ts in testsets)
-            # Polygon has no getter; tests carry a "points" field exactly when points are enabled.
-            remote = [t for ts in testsets for t in self._remote_tests(ts["name"], quiet=True).values()]
-            if remote and all(("points" in t) == enabled for t in remote):
-                self.unchanged("tests", "points", "enabled" if enabled else "disabled")
-            else:
-                self.write("tests", "points", "update", "problem.enablePoints",
-                           "enable" if enabled else "disable", enable=enabled)
+            self.guarded("tests", "points", lambda: self._points(testsets))
         for testset in testsets:
             self.guarded("tests", testset["name"], lambda testset=testset: self._testset(testset))
 
-    def _remote_tests(self, name: str, quiet: bool = False) -> dict[int, dict]:
-        try:
-            tests = self.read("problem.tests", [], testset=name, noInputs=quiet)
-        except PolygonError:
-            if quiet:
-                return {}
-            raise
-        return {t["index"]: t for t in tests}
+    def _points(self, testsets: list[dict]) -> None:
+        enabled = any(ts.get("pointsEnabled") for ts in testsets)
+        # Polygon has no getter; tests carry a "points" field exactly when points are enabled.
+        remote = [t for ts in testsets for t in self._remote_tests(ts["name"], inputs=False).values()]
+        if remote and all(("points" in t) == enabled for t in remote):
+            return self.unchanged("tests", "points", "enabled" if enabled else "disabled")
+        self.write("tests", "points", "update", "problem.enablePoints",
+                   "enable" if enabled else "disable", enable=enabled)
+
+    def _remote_tests(self, name: str, inputs: bool = True) -> dict[int, dict]:
+        return {t["index"]: t for t in self.read("problem.tests", [], testset=name, noInputs=not inputs)}
 
     def _groups_enabled(self, name: str) -> bool:
         if self.problem_id is None:
             return False
-        try:
-            self.read("problem.viewTestGroup", [], testset=name)
-        except PolygonError as exc:
-            if "disabled" in str(exc):
-                return False
-            raise
-        return True
+        return groups_enabled(self.api, self.problem_id, self.pin, name)
+
+    def _layout_differs(self, generated: dict[int, Test], remote: dict[int, dict]) -> bool:
+        """True unless Polygon's generated tests sit exactly where polyman numbers them."""
+        remote_generated = {i: t for i, t in remote.items() if not t.get("manual")}
+        return set(remote_generated) != set(generated) or any(
+            _script_command(remote_generated[i].get("scriptLine")) != [stem_of(t, self.config)] + t.args
+            for i, t in generated.items())
 
     def _testset(self, testset: dict) -> None:
         name = testset["name"]
@@ -379,7 +400,7 @@ class Sync:
         manual = {t.index: t for t in tests if t.manual}
         generated = {t.index: t for t in tests if not t.manual}
         inputs = {i: self.problem.text(t.input_path) for i, t in manual.items()}
-        script = to_polygon_script(script_text(self.problem, testset), self.config.get("generators") or [])
+        script = polygon_script(script_text(self.problem, testset), self.config.get("generators") or [])
 
         if "groupsEnabled" in testset:
             enable = bool(testset["groupsEnabled"])
@@ -391,30 +412,45 @@ class Sync:
 
         remote = self._remote_tests(name)
         remote_script = _body(self.read("problem.script", b"", raw=True, testset=name))
-        reset = _script_lines(remote_script) != _script_lines(script) or any(
-            i in remote and not remote[i].get("manual") for i in manual)
+        extra = sorted(i for i, t in remote.items() if t.get("manual") and i not in manual)
+        prune = bool(extra) and self.prune and "manualTests" in testset
+        if extra and self.prune and not prune:
+            self.warn("tests", f"{name}: tests {extra}", 'not pruning: the testset has no "manualTests" key '
+                                                         '(write "manualTests": [] to delete them all)')
+        elif extra and not prune:
+            self.warn("tests", f"{name}: tests {extra}", "remote manual tests not in Config.json; "
+                                                         "use --delete-extra-tests to delete them")
+        blocked = [i for i in extra if i in generated and not prune]
+        if blocked:
+            return self.fail("tests", f"{name}: script", f"remote manual tests {blocked} sit where the script "
+                             "puts generated tests; delete them (--delete-extra-tests) or add them to "
+                             "Config.json")
+
+        # Re-save the script when its text changed, or when the same text would number the tests
+        # differently now (a manual test added, moved or deleted shifts the `$` targets).
+        reset = _script_lines(remote_script) != _script_lines(script) or self._layout_differs(generated, remote)
         if reset and _script_lines(remote_script):
             if self.write("tests", f"{name}: script", "update", "problem.clearScript",
                           "clear before re-adding manual tests", testset=name) and not self.dry_run:
                 remote = self._remote_tests(name)
 
-        extra = sorted(i for i, t in remote.items() if t.get("manual") and i not in manual)
-        if extra and self.prune:
-            if self.write("tests", f"{name}: tests {extra}", "delete", "problem.deleteTest",
-                          "not in Config.json", testset=name,
-                          testIndices=",".join(map(str, extra))) and not self.dry_run:
-                remote = self._remote_tests(name)  # Polygon may renumber the rest
-        elif extra:
-            self.warn("tests", f"{name}: tests {extra}", "remote manual tests not in Config.json; "
-                                                         "use --prune to delete them")
+        if prune:
+            if not self.write("tests", f"{name}: tests {extra}", "delete", "problem.deleteTest",
+                              "not in Config.json", testset=name, testIndices=",".join(map(str, extra))):
+                return  # the script would collide with the tests that are still there
+            if not self.dry_run:
+                remote = self._remote_tests(name)  # manual tests keep their indices; `$` tests may move
+            else:
+                remote = {i: t for i, t in remote.items() if i not in extra}
 
         for index, test in manual.items():
             self._manual_test(name, test, inputs[index], remote.get(index))
 
         if reset and _script_lines(script):
-            if self.write("tests", f"{name}: script", "update", "problem.saveScript",
-                          f"{len(generated)} generated tests", testset=name, source=script.encode()) \
-                    and not self.dry_run:
+            if not self.write("tests", f"{name}: script", "update", "problem.saveScript",
+                              f"{len(generated)} generated tests", testset=name, source=script.encode()):
+                return  # nothing to check or group: the failed save is the error
+            if not self.dry_run:
                 remote = self._remote_tests(name)
         elif not reset:
             self.unchanged("tests", f"{name}: script")
@@ -428,7 +464,7 @@ class Sync:
         target = f"{testset}: test {test.index}"
         params: dict[str, Any] = {"testset": testset, "testIndex": test.index, "testInput": content}
         changed = []
-        if have is None or not have.get("manual") or lf(_remote_input(have)) != content:
+        if have is None or not have.get("manual") or _test_input(_remote_input(have)) != _test_input(content):
             changed.append("input")
         if test.group is not None:
             params["testGroup"] = test.group
@@ -512,6 +548,58 @@ def _script_command(line: str | None) -> list[str]:
     return tokenize(line[:arrow] if arrow >= 0 else line)
 
 
+def _with_group_headers(script: str, manual: set[int], groups: dict[int, str]) -> str | None:
+    """Insert ``<#-- @group X -->`` headers so polyman puts the generated tests back in their groups.
+
+    None when headers cannot express it: FreeMarker in the script, a line whose tests are in
+    different groups, or an ungrouped test after a grouped one (a header lasts until the next).
+    """
+    if "<#" in script:
+        return None
+    try:
+        parsed = parse_script(script)
+    except ConfigError:
+        return None
+    lines = script.split("\n")
+    headers: dict[int, str] = {}
+    used, next_free, current = set(manual), 1, None
+    for line in parsed:
+        if line.indices is None:
+            while next_free in used:
+                next_free += 1
+            indices = [next_free]
+            next_free += 1
+        else:
+            indices = line.indices
+        used.update(indices)
+        found = {groups.get(i) for i in indices}
+        if len(found) != 1:
+            return None
+        group = found.pop()
+        if group != current:
+            if group is None:
+                return None
+            headers[line.line - 1] = group
+            current = group
+    out = []
+    for number, text in enumerate(lines):
+        if number in headers:
+            out.append(f"<#-- @group {headers[number]} -->")
+        out.append(text)
+    return "\n".join(out)
+
+
+def groups_enabled(api: Polygon, problem_id: int, pin: str | None, testset: str) -> bool:
+    """Polygon has no getter; viewTestGroup fails with "Test groups are disabled" while they are off."""
+    try:
+        api.call("problem.viewTestGroup", problemId=problem_id, pin=pin, testset=testset)
+    except PolygonError as exc:
+        if "disabled" in str(exc):
+            return False
+        raise
+    return True
+
+
 def _remote_input(test: dict) -> str:
     if test.get("inputBase64") is not None:
         return base64.b64decode(test["inputBase64"]).decode("utf-8", "replace")
@@ -531,7 +619,7 @@ _STATEMENT_FILES = {"legend": "legend", "input": "input-format", "output": "outp
 
 
 def pull(api: Polygon, problem_id: int, directory: str, pin: str | None = None) -> dict:
-    """Write a polyman directory for an existing problem (the reverse of ``sync``).
+    """Write a polyman directory for an existing problem (the reverse of ``push``).
 
     Reads only; Polygon is never changed.  Things polyman cannot express (resource
     files, statement resources, groups of generated tests without ``@group``
@@ -635,13 +723,20 @@ def pull(api: Polygon, problem_id: int, directory: str, pin: str | None = None) 
     testset: dict[str, Any] = {"name": "tests"}
     tests = q("problem.tests", testset="tests", noInputs=False) or []
     script = lf(_body(q("problem.script", raw=True, testset="tests")))
+    generated_groups = {t["index"]: t["group"] for t in tests if not t.get("manual") and t.get("group")}
+    if generated_groups and "@group" not in script:
+        headed = _with_group_headers(script, {t["index"] for t in tests if t.get("manual")}, generated_groups)
+        if headed is None:
+            warnings.append("generated tests have groups that <#-- @group --> headers cannot express for "
+                            "this script; add them before syncing back")
+        else:
+            script = headed
     if script.strip():
         testset["generatorScript"] = {"scriptFile": put("generators/gen-script.txt", script)}
-    try:
+    groups = []
+    if groups_enabled(api, problem_id, pin, "tests"):
         groups = q("problem.viewTestGroup", testset="tests")
         testset["groupsEnabled"] = True
-    except PolygonError:
-        groups = []
     if tests:
         testset["pointsEnabled"] = all("points" in t for t in tests)
     manual = []
@@ -658,9 +753,6 @@ def pull(api: Polygon, problem_id: int, directory: str, pin: str | None = None) 
         manual.append(entry)
     if manual:
         testset["manualTests"] = manual
-    if any(t.get("group") for t in tests if not t.get("manual")) and "@group" not in script:
-        warnings.append("generated tests have groups but the script has no <#-- @group --> headers; "
-                        "add them before syncing back")
     if groups:
         testset["groups"] = [{k: g[k] for k in ("name", "pointsPolicy", "feedbackPolicy", "dependencies") if k in g}
                              for g in groups]

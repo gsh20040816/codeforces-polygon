@@ -2,7 +2,8 @@
 
 Each leaf command maps to one Polygon API method (or a small workflow) and
 returns plain data.  ``--json`` prints it as JSON; otherwise a compact text
-form is printed.  Errors go to stderr with exit status 1 (2 for bad usage).
+form is printed.  Results go to stdout, errors to stderr; exit status is 0 on
+success, 1 when the command failed, 2 for bad usage.
 """
 
 from __future__ import annotations
@@ -25,7 +26,9 @@ from .polyman import ConfigError
 EPILOG = """\
 Credentials: POLYGON_API_KEY / POLYGON_API_SECRET for API commands,
 POLYGON_LOGIN / POLYGON_PASSWORD for the `download` group.
-Text options marked TEXT accept a literal, @path to read a UTF-8 file, or @- for stdin.
+A TEXT option --X has a --X-file PATH twin that reads the text from a UTF-8 file
+(PATH - reads stdin, once per command). Use -- to end options.
+Results go to stdout, errors to stderr. Exit status: 0 success, 1 failure, 2 usage error.
 Run `polygonctl <group> <command> --help` for details on any command."""
 
 FILE_TYPES = ("source", "resource", "aux")
@@ -34,6 +37,10 @@ EXTRA_TAGS = tuple(tag for tag in SOLUTION_TAGS if tag != "MA")
 ISSUE_TYPES = ("DISCUSSION", "ENHANCEMENT", "BUG")
 TAG_HELP = ("expected verdict: MA=main, OK, WA, TL, TO=TL-or-OK, TM=TL-or-ML, ML, RE, PE, "
             "RJ=any rejection, NR=do not run")
+
+
+class UsageError(Exception):
+    """Bad command-line usage found after parsing (exit 2)."""
 
 
 class Unfinished(PolygonError):
@@ -50,49 +57,61 @@ _stdin_used = False
 
 
 def _stdin() -> bytes:
-    """Read stdin once; a second ``@-``/``-`` in one command would silently get ``b''``."""
+    """Read stdin once; a second ``-`` in one command would silently get ``b''``."""
     global _stdin_used
     if _stdin_used:
-        raise argparse.ArgumentTypeError("stdin (@- or -) can be used only once per command")
+        raise argparse.ArgumentTypeError("stdin (-) can be used only once per command")
     _stdin_used = True
     return sys.stdin.buffer.read()
 
 
-def text(value: str) -> str:
-    """argparse type: literal text, ``@path`` file contents, or ``@-`` stdin.
-
-    Files are decoded as UTF-8 without newline translation, so CRLF is sent as is.
-    """
-    if not value.startswith("@"):
-        return value
+def read_bytes(path: str) -> bytes:
+    """argparse type for file paths: the file's bytes, or stdin for ``-``."""
     try:
-        data = _stdin() if value == "@-" else Path(value[1:]).expanduser().read_bytes()
-        return data.decode("utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise argparse.ArgumentTypeError(f"{value}: {exc}") from None
-
-
-def upload(value: str) -> bytes:
-    """argparse type for upload paths: file bytes, or stdin for ``-``."""
-    try:
-        return _stdin() if value == "-" else Path(value).expanduser().read_bytes()
+        return _stdin() if path == "-" else Path(path).expanduser().read_bytes()
     except OSError as exc:
-        raise argparse.ArgumentTypeError(f"{value}: {exc}") from None
+        raise argparse.ArgumentTypeError(f"{path}: {exc.strerror or exc}") from None
 
 
-def param(value: str) -> tuple[str, Any]:
-    """argparse type for ``call``: ``KEY=VALUE``, or ``KEY=@path`` / ``KEY=@-`` for bytes."""
+def read_text(path: str) -> str:
+    """argparse type for ``--X-file``: UTF-8 file contents (no newline translation; CRLF is sent as is)."""
+    try:
+        return read_bytes(path).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise argparse.ArgumentTypeError(f"{path}: not UTF-8 ({exc})") from None
+
+
+upload = read_bytes  # kept for the upload commands, which read PATH when they run
+
+
+def _key_value(value: str) -> tuple[str, str]:
     key, sep, val = value.partition("=")
     if not sep or not key:
-        raise argparse.ArgumentTypeError(f"parameter must be KEY=VALUE: {value!r}")
-    return key, upload(val[1:]) if val.startswith("@") else val
+        raise argparse.ArgumentTypeError(f"expected KEY=VALUE: {value!r}")
+    return key, val
+
+
+def param(value: str) -> tuple[str, str]:
+    """argparse type for ``call`` parameters: ``KEY=VALUE``, sent literally."""
+    return _key_value(value)
+
+
+def file_param(value: str) -> tuple[str, bytes]:
+    """argparse type for ``call --file KEY=PATH``: the file's bytes (``-`` = stdin)."""
+    key, path = _key_value(value)
+    return key, read_bytes(path)
+
+
+def confirm(a: argparse.Namespace, what: str) -> None:
+    if not a.yes:
+        raise UsageError(f"{what}; pass --yes to confirm")
 
 
 def upload_name(args: argparse.Namespace) -> str:
     if args.name:
         return args.name
     if args.path == "-":
-        raise PolygonError("--name is required when reading from stdin")
+        raise UsageError("--name is required when reading from stdin")
     return Path(args.path).name
 
 
@@ -208,6 +227,7 @@ def problem_update_working_copy(a):
 
 
 def problem_discard_working_copy(a):
+    confirm(a, "this throws away every uncommitted change in the working copy")
     return pq(a, "problem.discardWorkingCopy")
 
 
@@ -216,6 +236,8 @@ def problem_tags(a):
 
 
 def problem_set_tags(a):
+    if bool(a.tags) == a.clear:
+        raise UsageError("give the new tags, or --clear to remove all tags")
     # Polygon rejects an empty value ("Field should not be empty"); a lone comma clears all tags.
     return pq(a, "problem.saveTags", tags=",".join(a.tags) or ",")
 
@@ -243,6 +265,7 @@ def access_list(a):
 
 
 def access_set(a):
+    confirm(a, f"this changes {a.login}'s access immediately and Polygon notifies them")
     return pq(a, "problem.setAccess", login=a.login, accessType=a.access)
 
 
@@ -260,10 +283,12 @@ def issue_list(a):
 
 
 def issue_add(a):
+    confirm(a, "Polygon e-mails the people involved about a new issue")
     return pq(a, "problem.addIssue", type=a.type, content=a.content, assignee=a.assignee)
 
 
 def issue_update(a):
+    confirm(a, "Polygon e-mails the people involved about the issue change")
     return pq(a, "problem.updateIssue", issueId=a.issue_id, comment=a.comment, status=a.status,
               type=a.type, assignee=a.assignee)
 
@@ -278,6 +303,7 @@ def material_set(a):
 
 
 def material_remove(a):
+    confirm(a, f"this removes material {a.name} from the working copy")
     return pq(a, "problem.setMaterial", name=a.name, remove=True)
 
 
@@ -315,8 +341,8 @@ def statement_render(a):
     failed = [f"{kind[:-1]} {item.get('language')} {fmt}: {(item.get(fmt) or {}).get('message')}"
               for kind in ("statements", "tutorials") for item in result.get(kind) or []
               for fmt in ("html", "pdf") if (item.get(fmt) or {}).get("status") == "FAILED"]
-    if failed and a.strict:
-        raise PolygonError("render failed: " + "; ".join(failed))
+    if failed:
+        raise Unfinished("render failed: " + "; ".join(failed), result)
     return result
 
 
@@ -349,8 +375,8 @@ def file_view(a):
 def file_upload(a):
     return pq(a, "problem.saveFile", type=a.type, name=upload_name(a), file=upload_data(a),
               sourceType=a.source_type, forTypes=a.for_types,
-              stages=";".join(a.stages) if a.stages else None,
-              assets=";".join(a.assets) if a.assets else None,
+              stages=";".join(a.stage) if a.stage else None,
+              assets=";".join(a.asset) if a.asset else None,
               checkExisting=a.check_existing)
 
 
@@ -424,6 +450,7 @@ def test_save(a):
 
 
 def test_delete(a):
+    confirm(a, f"this deletes tests {' '.join(map(str, a.indices))} from testset {a.testset}")
     return pq(a, "problem.deleteTest", testset=a.testset, testIndices=",".join(map(str, a.indices)))
 
 
@@ -432,6 +459,7 @@ def test_script(a):
 
 
 def test_clear_script(a):
+    confirm(a, f"this removes the script of testset {a.testset} and every test it generated")
     return pq(a, "problem.clearScript", testset=a.testset)
 
 
@@ -439,20 +467,14 @@ def test_preview(a):
     return pq(a, "problem.previewTests", testset=a.testset)
 
 
-def test_enable_checker_percent(a):
-    return pq(a, "problem.enableTreatPointsFromCheckerAsPercent", enable=not a.disable)
+def switch(method: str, enable: bool, testset: bool = False) -> Callable:
+    if testset:
+        return lambda a: pq(a, method, testset=a.testset, enable=enable)
+    return lambda a: pq(a, method, enable=enable)
 
 
 def test_save_script(a):
     return pq(a, "problem.saveScript", testset=a.testset, source=upload_data(a))
-
-
-def test_enable_groups(a):
-    return pq(a, "problem.enableGroups", testset=a.testset, enable=not a.disable)
-
-
-def test_enable_points(a):
-    return pq(a, "problem.enablePoints", enable=not a.disable)
 
 
 def test_groups(a):
@@ -462,7 +484,8 @@ def test_groups(a):
 def test_save_group(a):
     return pq(a, "problem.saveTestGroup", testset=a.testset, group=a.group,
               pointsPolicy=a.points_policy, feedbackPolicy=a.feedback_policy,
-              dependencies=",".join(a.dependencies) if a.dependencies is not None else None)
+              dependencies=None if a.dependency is None and not a.no_dependencies
+              else ",".join(a.dependency or []))
 
 
 def test_set_group(a):
@@ -520,10 +543,12 @@ def download_statements_pdf(a):
 
 
 def raw_call(a):
-    return api().call(a.method, raw=a.raw, **dict(a.params))
+    params = dict(a.params)
+    params.update(dict(a.file or []))
+    return api().call(a.method, raw=True if a.raw else None, **params)
 
 
-# --------------------------------------------------------------------------- sync
+# --------------------------------------------------------------------------- push / pull
 
 def sections(value: str) -> list[str]:
     names = [v.strip() for v in value.split(",") if v.strip()]
@@ -534,8 +559,9 @@ def sections(value: str) -> list[str]:
     return names
 
 
-def sync_dir(a):
-    result = polyman_sync.sync(api(), a.dir, dry_run=a.dry_run, prune=a.prune, only=a.only, pin=a.pin)
+def push_dir(a):
+    result = polyman_sync.sync(api(), a.dir, dry_run=a.dry_run, prune=a.delete_extra_tests, only=a.only,
+                               pin=a.pin)
     shown = result if a.json else result["steps"]
     if not result["ok"]:
         failed = [f"{s['section']}/{s['target']}: {s['detail']}" for s in result["steps"] if s["status"] == "failed"]
@@ -574,15 +600,36 @@ def _testset(parser):
     parser.add_argument("--testset", default="tests", help="testset name (default: tests)")
 
 
+def _text(parser, option: str, *, required: bool = False, help: str | None = None, dest: str | None = None):
+    """``--X TEXT`` plus ``--X-file PATH`` (``-`` = stdin); exactly one when required."""
+    group = parser.add_mutually_exclusive_group(required=required)
+    dest = dest or option.replace("-", "_")
+    group.add_argument(f"--{option}", dest=dest, metavar="TEXT", help=help)
+    group.add_argument(f"--{option}-file", dest=dest, type=read_text, metavar="PATH",
+                       help=f"read --{option} from a UTF-8 file (- for stdin)")
+
+
+def _text_positional(parser, help: str):
+    """A positional ``TEXT`` or ``--file PATH`` (``-`` = stdin); exactly one."""
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("text", nargs="?", metavar="TEXT", help=help)
+    group.add_argument("--file", dest="text_file", type=read_text, metavar="PATH",
+                       help="read TEXT from a UTF-8 file (- for stdin)")
+
+
 def _upload(parser, what: str):
-    parser.add_argument("path", help=f"local {what} to upload, or - for stdin")
-    parser.add_argument("--name", help="name in Polygon (default: basename of PATH)")
+    parser.add_argument("path", metavar="PATH", help=f"local {what} to upload, or - for stdin")
+    parser.add_argument("--name", help="name in Polygon (default: basename of PATH; required with -)")
     _check_existing(parser)
 
 
 def _check_existing(parser):
     parser.add_argument("--check-existing", action="store_true", default=None,
                         help="fail instead of overwriting if it already exists")
+
+
+def _yes(parser, what: str):
+    parser.add_argument("-y", "--yes", action="store_true", help=f"confirm: {what} (required)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -611,51 +658,61 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--memory-limit", type=int, metavar="MB", help="memory limit in megabytes")
     p.add_argument("--interactive", action=argparse.BooleanOptionalAction, default=None)
     p = _leaf(g, "check", problem_check,
-              "Readiness check: print errors (must fix) and warnings before building a package")
+              "Local readiness heuristics: print errors (must fix) and warnings before building a package. "
+              "Exit status is 0 whenever the check ran; read `ready` and `errors`")
     _testset(p)
     _leaf(g, "cautions", problem_cautions,
           "Polygon's own cautions and package-readiness issues for the working copy")
-    p = _leaf(g, "commit", problem_commit, "Commit working-copy changes (needed before building)")
+    p = _leaf(g, "commit", problem_commit,
+              "Commit working-copy changes (needed before building); e-mails watchers unless --minor")
     p.add_argument("-m", "--message", help="commit message")
     p.add_argument("--minor", action="store_true", help="mark as minor changes (no e-mail notification)")
     _leaf(g, "update-working-copy", problem_update_working_copy, "Update the working copy to the latest revision")
-    _leaf(g, "discard-working-copy", problem_discard_working_copy, "Discard uncommitted working-copy changes")
+    p = _leaf(g, "discard-working-copy", problem_discard_working_copy,
+              "Throw away all uncommitted working-copy changes (needs --yes)")
+    _yes(p, "discard the uncommitted changes")
     _leaf(g, "tags", problem_tags, "Show problem tags")
-    p = _leaf(g, "set-tags", problem_set_tags, "Replace problem tags")
-    p.add_argument("tags", nargs="*", help="new tag list, each 2-32 characters (no tags clears them)")
+    p = _leaf(g, "set-tags", problem_set_tags, "Replace all problem tags (or remove them with --clear)")
+    p.add_argument("tags", nargs="*", metavar="TAG", help="new tags, each 2-32 characters")
+    p.add_argument("--clear", action="store_true", help="remove all tags (give no TAG)")
     _leaf(g, "description", problem_description, "Show the general description")
     p = _leaf(g, "set-description", problem_set_description, "Replace the general description")
-    p.add_argument("text", type=text, metavar="TEXT")
+    _text_positional(p, "new description")
     _leaf(g, "tutorial", problem_tutorial, "Show the general tutorial")
     p = _leaf(g, "set-tutorial", problem_set_tutorial, "Replace the general tutorial")
-    p.add_argument("text", type=text, metavar="TEXT")
+    _text_positional(p, "new tutorial")
 
     # access / note / issue / material (problem-level; access, note and issues bypass the working copy)
     g = _group(root, "access", "Direct problem access (changes apply immediately, no commit)")
     _leaf(g, "list", access_list, "List direct access entries (users and @groups)")
-    p = _leaf(g, "set", access_set, "Grant, change or remove one user's direct access; notifies the user")
+    p = _leaf(g, "set", access_set, "Grant, change or remove one user's direct access. Applies immediately "
+                                    "and Polygon notifies the user (needs --yes)")
     p.add_argument("login", help="exact user login (not an @group)")
     p.add_argument("access", choices=("READ", "WRITE", "NONE"), help="NONE removes the direct entry")
+    _yes(p, "change the access and notify the user")
 
     g = _group(root, "note", "The problem's private note, shown in problem lists (not statement notes)")
     _leaf(g, "show", note_show, "Print the problem note")
     p = _leaf(g, "set", note_set, "Replace the problem note (up to 50 characters, applies immediately)")
-    p.add_argument("text", type=text, metavar="TEXT", help="note text; '' clears it")
+    _text_positional(p, "note text; '' clears it")
 
-    g = _group(root, "issue", "Problem issues (applied immediately and e-mailed like the web UI)")
+    g = _group(root, "issue", "Problem issues (changes apply immediately; Polygon e-mails them like the web UI)")
     p = _leaf(g, "list", issue_list, "List issues with comments, most recently changed first")
     p.add_argument("--open", action="store_true", help="only OPENED/REOPENED issues")
-    p = _leaf(g, "add", issue_add, "Open a new issue")
+    p = _leaf(g, "add", issue_add, "Open a new issue; Polygon e-mails the people involved (needs --yes)")
     p.add_argument("--type", choices=ISSUE_TYPES, required=True)
-    p.add_argument("--content", type=text, metavar="TEXT", required=True, help="issue text (Markdown)")
+    _text(p, "content", required=True, help="issue text (Markdown)")
     p.add_argument("--assignee", help="login with WRITE access to assign it to")
+    _yes(p, "open the issue and send the e-mails")
     p = _leaf(g, "update", issue_update,
-              "Comment on, close/reopen, retype or reassign an issue (needs a comment or a change)")
+              "Comment on, close/reopen, retype or reassign an issue (needs a comment or a change); "
+              "Polygon e-mails the people involved (needs --yes)")
     p.add_argument("issue_id", type=int)
-    p.add_argument("--comment", type=text, metavar="TEXT", help="comment (Markdown)")
+    _text(p, "comment", help="comment (Markdown)")
     p.add_argument("--status", choices=("CLOSED", "REOPENED"))
     p.add_argument("--type", choices=ISSUE_TYPES)
     p.add_argument("--assignee", help="new assignee login; '' removes the assignee")
+    _yes(p, "change the issue and send the e-mails")
 
     g = _group(root, "material", "Publishable materials (working copy; commit to keep)")
     _leaf(g, "list", material_list, "List materials with their items")
@@ -663,28 +720,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name", help="material name after saving (1-40 chars, a valid file name)")
     p.add_argument("--publish-strategy", choices=("NONE", "WITH_TUTORIAL", "WITH_STATEMENT"), required=True,
                    help="NONE keeps the material unpublished")
-    p.add_argument("--items", type=text, metavar="TEXT", required=True,
-                   help='JSON array of MaterialItem, e.g. \'[{"type":"SOLUTIONS","names":["main.cpp"]}]\'')
+    _text(p, "items", required=True,
+          help='JSON array of MaterialItem, e.g. \'[{"type":"SOLUTIONS","names":["main.cpp"]}]\'')
     p.add_argument("--rename-from", metavar="OLD", help="rename material OLD to NAME atomically")
-    p = _leaf(g, "remove", material_remove, "Remove a material (no-op if absent)")
+    p = _leaf(g, "remove", material_remove, "Remove a material from the working copy; succeeds if absent "
+                                            "(needs --yes)")
     p.add_argument("name")
+    _yes(p, "remove the material")
 
     # statement
     g = _group(root, "statement", "Read and write problem statements and their resources")
     p = _leaf(g, "list", statement_list, "Show statements for all languages (or one with --lang)")
     p.add_argument("--lang", help="only this language, e.g. english")
     p = _leaf(g, "render", statement_render,
-              "Render statements and tutorials (HTML + PDF) from the working copy; can take minutes")
+              "Render statements and tutorials (HTML + PDF) from the working copy; can take minutes. "
+              "Prints the result; exit 1 if any render failed")
     p.add_argument("--save-dir", metavar="DIR",
                    help="download the rendered files into DIR as statement-<lang>.pdf etc.")
-    p.add_argument("--strict", action="store_true", help="exit 1 if any render failed")
     p = _leaf(g, "save", statement_save, "Create or update a statement; omitted sections are kept")
     p.add_argument("--lang", default="english", help="statement language (default: english)")
     p.add_argument("--encoding", default="UTF-8", help="statement encoding (default: UTF-8)")
-    p.add_argument("--name", type=text, metavar="TEXT",
-                   help="problem title in this language (no trailing newline: Polygon rejects it)")
+    _text(p, "name", help="problem title in this language (no trailing newline: Polygon rejects it)")
     for section in ("legend", "input", "output", "scoring", "interaction", "notes", "tutorial"):
-        p.add_argument(f"--{section}", type=text, metavar="TEXT", help=f"{section} section (LaTeX)")
+        _text(p, section, help=f"{section} section (LaTeX)")
     _leaf(g, "resources", statement_resources, "List statement resource files (images etc.)")
     p = _leaf(g, "view-resource", statement_view_resource, "Download a statement resource", output=True)
     p.add_argument("name", help="resource file name")
@@ -703,11 +761,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--type", choices=FILE_TYPES, default="source", help="file type (default: source)")
     p.add_argument("--source-type", help="compiler for source files, e.g. cpp.g++17 (default: by extension)")
     p.add_argument("--for-types", help="resource files only: forTypes, e.g. 'cpp.*'; give it together with "
-                                       "--stages and --assets; '' alone removes the advanced properties")
-    p.add_argument("--stages", nargs="+", choices=("COMPILE", "RUN"),
-                   help="resource files only; Polygon currently accepts only COMPILE")
-    p.add_argument("--assets", nargs="+", choices=("VALIDATOR", "INTERACTOR", "CHECKER", "SOLUTION"),
-                   help="resource files only; Polygon currently accepts only SOLUTION")
+                                       "--stage and --asset; '' alone removes the advanced properties")
+    p.add_argument("--stage", action="append", choices=("COMPILE", "RUN"),
+                   help="resource files only, repeatable; Polygon currently accepts only COMPILE")
+    p.add_argument("--asset", action="append", choices=("VALIDATOR", "INTERACTOR", "CHECKER", "SOLUTION"),
+                   help="resource files only, repeatable; Polygon currently accepts only SOLUTION")
 
     # solution
     g = _group(root, "solution", "Main, correct and wrong solutions")
@@ -738,7 +796,7 @@ def build_parser() -> argparse.ArgumentParser:
     _leaf(g, "tests", role_show("problem.validatorTests"), "List validator tests")
     p = _leaf(g, "save-test", validator_save_test, "Add or replace a validator test")
     p.add_argument("index", type=int, help="test index (1-based)")
-    p.add_argument("--input", type=text, metavar="TEXT", required=True)
+    _text(p, "input", required=True)
     p.add_argument("--verdict", choices=("VALID", "INVALID"), required=True)
     p.add_argument("--testset", help="testset the input is validated against")
     p.add_argument("--group", help="test group the input is validated against")
@@ -752,10 +810,9 @@ def build_parser() -> argparse.ArgumentParser:
     _leaf(g, "tests", role_show("problem.checkerTests"), "List checker tests")
     p = _leaf(g, "save-test", checker_save_test, "Add or replace a checker test")
     p.add_argument("index", type=int, help="test index (1-based)")
-    p.add_argument("--input", type=text, metavar="TEXT", required=True)
-    p.add_argument("--output", dest="output_text", type=text, metavar="TEXT", required=True,
-                   help="contestant output")
-    p.add_argument("--answer", type=text, metavar="TEXT", required=True, help="jury answer")
+    _text(p, "input", required=True)
+    _text(p, "output", required=True, dest="output_text", help="contestant output")
+    _text(p, "answer", required=True, help="jury answer")
     p.add_argument("--verdict", choices=("OK", "WRONG_ANSWER", "PRESENTATION_ERROR", "CRASHED"),
                    required=True)
     _check_existing(p)
@@ -779,50 +836,58 @@ def build_parser() -> argparse.ArgumentParser:
     p = _leaf(g, "save", test_save, "Add or update a manual test, or change test properties")
     p.add_argument("index", type=int, help="test index (1-based)")
     _testset(p)
-    p.add_argument("--input", type=text, metavar="TEXT", help="test input (required for a new test)")
+    _text(p, "input", help="test input (required for a new test)")
     p.add_argument("--group", help="test group")
     p.add_argument("--points", type=float, help="points (problem must have points enabled)")
     p.add_argument("--description", help="test description")
     p.add_argument("--sample", action=argparse.BooleanOptionalAction, default=None,
                    help="show this test as a statement sample")
-    p.add_argument("--statement-input", type=text, metavar="TEXT", help="input shown in the statement")
-    p.add_argument("--statement-output", type=text, metavar="TEXT", help="output shown in the statement")
+    _text(p, "statement-input", help="input shown in the statement")
+    _text(p, "statement-output", help="output shown in the statement")
     p.add_argument("--verify-statement-io", action=argparse.BooleanOptionalAction, default=None)
     _check_existing(p)
-    p = _leaf(g, "delete", test_delete, "Delete tests (all-or-nothing)")
+    p = _leaf(g, "delete", test_delete, "Delete tests, all or none (needs --yes). Manual tests keep their "
+                                        "indices; Polygon renumbers tests generated with '> $'")
     p.add_argument("indices", nargs="+", type=int, metavar="INDEX", help="test indices (1-based)")
     _testset(p)
+    _yes(p, "delete the tests")
     p = _leaf(g, "script", test_script, "Print the test generation script", output=True)
     _testset(p)
-    p = _leaf(g, "clear-script", test_clear_script, "Clear the generation script (removes generated tests)")
+    p = _leaf(g, "clear-script", test_clear_script,
+              "Remove the generation script and all generated tests of a testset (needs --yes)")
     _testset(p)
+    _yes(p, "remove the script and the generated tests")
     p = _leaf(g, "preview", test_preview,
               "Preview tests (input/answer); missing previews start generating, so repeat later")
     _testset(p)
     p = _leaf(g, "save-script", test_save_script,
-              "Replace the generation script; each line is '<generator> <args> > <index>' or '... > $'")
-    p.add_argument("path", help="local script file, or - for stdin")
+              "Replace the generation script and the tests it generates; each line is "
+              "'<generator> <args> > <index>' or '... > $'")
+    p.add_argument("path", metavar="PATH", help="local script file, or - for stdin")
     _testset(p)
-    p = _leaf(g, "enable-groups", test_enable_groups, "Enable test groups for a testset")
-    _testset(p)
-    p.add_argument("--disable", action="store_true", help="disable instead")
-    p = _leaf(g, "enable-points", test_enable_points, "Enable points for the problem")
-    p.add_argument("--disable", action="store_true", help="disable instead")
-    p = _leaf(g, "enable-checker-percent", test_enable_checker_percent,
-              "Treat points returned by the checker as percents (needs points enabled)")
-    p.add_argument("--disable", action="store_true", help="disable instead")
-    p = _leaf(g, "groups", test_groups, "List test groups")
+    for verb, enable in (("enable", True), ("disable", False)):
+        p = _leaf(g, f"{verb}-groups", switch("problem.enableGroups", enable, testset=True),
+                  f"{verb.capitalize()} test groups for a testset")
+        _testset(p)
+        _leaf(g, f"{verb}-points", switch("problem.enablePoints", enable), f"{verb.capitalize()} points")
+        _leaf(g, f"{verb}-checker-percent", switch("problem.enableTreatPointsFromCheckerAsPercent", enable),
+              f"{verb.capitalize()} treating points returned by the checker as percents"
+              + (" (needs points enabled)" if enable else ""))
+    p = _leaf(g, "groups", test_groups, "List test groups with their policies")
     _testset(p)
     p.add_argument("--group", help="only this group")
-    p = _leaf(g, "save-group", test_save_group,
-              "Set a test group's policies/dependencies. The group must already exist: it is created by "
-              "assigning a test to it (test save --group / test set-group), after enable-groups")
+    p = _leaf(g, "set-group-policy", test_save_group,
+              "Set an existing group's points/feedback policy and dependencies. A group exists once a test "
+              "is assigned to it (test save --group, test assign-group), after enable-groups")
     p.add_argument("group")
     _testset(p)
     p.add_argument("--points-policy", choices=("COMPLETE_GROUP", "EACH_TEST"))
     p.add_argument("--feedback-policy", choices=("NONE", "POINTS", "ICPC", "COMPLETE"))
-    p.add_argument("--dependencies", nargs="*", metavar="GROUP", help="groups this group depends on")
-    p = _leaf(g, "set-group", test_set_group, "Put tests into a group (creates the group if new)")
+    deps = p.add_mutually_exclusive_group()
+    deps.add_argument("--dependency", action="append", metavar="GROUP",
+                      help="a group this group depends on; repeat for several (replaces the list)")
+    deps.add_argument("--no-dependencies", action="store_true", help="remove all dependencies")
+    p = _leaf(g, "assign-group", test_set_group, "Put tests into a group (creates the group if new)")
     p.add_argument("group")
     p.add_argument("indices", nargs="+", type=int, metavar="INDEX")
     _testset(p)
@@ -872,31 +937,38 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--lang", default="english", help="statement language (default: english)")
 
     # polyman directories
-    p = _leaf(root, "sync", sync_dir,
-              "Push a polyman problem directory (Config.json) to Polygon; only differences are written",
+    p = _leaf(root, "push", push_dir,
+              "One-way push of a polyman problem directory (Config.json) to Polygon: reads Polygon, writes "
+              "only the differences to the working copy (never commits). Creates the problem on the first run. "
+              "Exit 1 if any step failed, also with --dry-run",
               problem=False)
-    p.add_argument("dir", help="polyman problem directory containing Config.json")
+    p.add_argument("dir", metavar="DIR", help="polyman problem directory containing Config.json")
     p.add_argument("--pin", help="problem PIN, if the problem has one")
-    p.add_argument("--dry-run", action="store_true",
-                   help="read Polygon and print the planned writes without changing anything")
+    p.add_argument("-n", "--dry-run", action="store_true",
+                   help="read Polygon and print the planned writes without changing anything; it cannot "
+                        "predict writes that Polygon itself would reject")
     p.add_argument("--only", type=sections, metavar="SECTION[,SECTION...]",
-                   help="sync only these sections: " + ", ".join(polyman_sync.SECTIONS))
-    p.add_argument("--prune", action="store_true",
-                   help="delete remote manual tests that Config.json does not have "
-                        "(files, solutions and statements cannot be deleted; they are reported)")
+                   help="push only these sections: " + ", ".join(polyman_sync.SECTIONS))
+    p.add_argument("--delete-extra-tests", action="store_true",
+                   help="delete remote manual tests that the testset's manualTests list lacks (only when "
+                        "Config.json has a manualTests key). Files, solutions and statements are never "
+                        "deleted; extra ones are reported as warnings")
 
-    p = _leaf(root, "pull", pull_dir, "Write a polyman problem directory for an existing problem (read-only)")
-    p.add_argument("dir", help="new or empty directory")
+    p = _leaf(root, "pull", pull_dir, "Write a polyman problem directory for an existing problem "
+                                      "(reads Polygon only)")
+    p.add_argument("dir", metavar="DIR", help="new or empty directory")
 
     # raw
     p = _leaf(root, "call", raw_call,
               "Call any API method directly, e.g. `call problem.info problemId=123`", problem=False,
               output=True)
     p.add_argument("method", help="API method name, e.g. problem.viewTags")
-    p.add_argument("params", nargs="*", type=param, metavar="KEY=VALUE",
-                   help="parameters; KEY=@path sends a file's bytes, KEY=@- reads stdin")
+    p.add_argument("params", nargs="*", type=param, metavar="KEY=VALUE", help="parameters, sent literally")
+    p.add_argument("--file", action="append", type=file_param, metavar="KEY=PATH",
+                   help="send a file's bytes as parameter KEY (PATH - reads stdin); repeatable")
     p.add_argument("--raw", action="store_true",
-                   help="always return the body as bytes (non-JSON responses are detected anyway)")
+                   help="always return the body as bytes (without it, a body that is not a JSON status "
+                        "envelope is returned as bytes too)")
     return parser
 
 
@@ -907,6 +979,8 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8")
     _stdin_used = False
     args = build_parser().parse_args(argv)
+    if getattr(args, "text_file", None) is not None:  # positional TEXT given as --file PATH
+        args.text = args.text_file
     try:
         emit(args.handler(args), args)
     except Unfinished as exc:
@@ -914,7 +988,7 @@ def main(argv: list[str] | None = None) -> int:
         return _fail(args, str(exc), 1)
     except ConfigError as exc:
         return _fail(args, str(exc), 1)
-    except argparse.ArgumentTypeError as exc:  # bad local input found while running, e.g. a missing upload file
+    except (argparse.ArgumentTypeError, UsageError) as exc:  # e.g. a missing upload file, no --yes
         return _fail(args, str(exc), 2)
     except (PolygonError, requests.RequestException, OSError) as exc:
         return _fail(args, str(exc), 1)

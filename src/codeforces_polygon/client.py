@@ -94,12 +94,14 @@ class Polygon:
             )
         return cls(key, secret, os.environ.get("POLYGON_URL", DEFAULT_URL))
 
-    def call(self, method: str, *, raw: bool = False, **params: Any) -> Any:
+    def call(self, method: str, *, raw: bool | None = False, **params: Any) -> Any:
         """Call an API method.  ``None`` params are omitted.
 
-        Returns the ``result`` field of the JSON response, or the response
-        body as bytes for file/test/package downloads: when ``raw`` is true,
-        or when a successful response is not a JSON status envelope.
+        Returns the ``result`` field of the JSON response.  ``raw=True`` returns
+        the body as bytes (file/test/package downloads); ``raw=None`` decides
+        from the body: a JSON status envelope is parsed, anything else that came
+        back with HTTP 200 is returned as bytes (for ``polygonctl call``).
+        With ``raw=False`` a body that is not an envelope is an error.
         """
         fields = {key: _to_bytes(value) for key, value in params.items() if value is not None}
         fields["apiKey"] = self.key.encode()
@@ -113,8 +115,8 @@ class Polygon:
             return response.content
         data = _envelope(response)
         if data is None:
-            if response.status_code == 200:
-                return response.content  # a file, test or script body although raw was not requested
+            if raw is None and response.status_code == 200:
+                return response.content  # a file, test or script body
             raise PolygonError(_failure_message(method, response), response.status_code)
         if data.get("status") != "OK":
             raise PolygonError(_failure_message(method, response), response.status_code)

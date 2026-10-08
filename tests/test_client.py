@@ -101,11 +101,20 @@ class CallTest(unittest.TestCase):
     def test_file_body_without_raw_is_returned_as_bytes(self, post, _time):
         # `call problem.viewFile` without --raw; Polygon labels everything text/html
         post.return_value = response(content=b"#include <cstdio>\n", content_type="text/html;charset=UTF-8")
-        self.assertEqual(self.api.call("problem.viewFile", problemId=1), b"#include <cstdio>\n")
+        self.assertEqual(self.api.call("problem.viewFile", raw=None, problemId=1), b"#include <cstdio>\n")
 
     def test_scalar_json_body_is_a_file_not_a_crash(self, post, _time):
         post.return_value = response(body=5)
-        self.assertEqual(self.api.call("problem.testInput", problemId=1), b"5")
+        self.assertEqual(self.api.call("problem.testInput", raw=None, problemId=1), b"5")
+
+    def test_non_envelope_200_is_an_error_unless_auto_detecting(self, post, _time):
+        # a maintenance or proxy page must not pass for a result
+        post.return_value = response(content=b"<html>maintenance</html>", content_type="text/html;charset=UTF-8")
+        with self.assertRaisesRegex(PolygonError, "HTTP 200: <html>maintenance"):
+            self.api.call("problem.info", problemId=1)
+        post.return_value = response(body=5)
+        with self.assertRaises(PolygonError):
+            self.api.call("problem.viewTags", problemId=1)
 
     def test_http_status_is_kept_on_errors(self, post, _time):
         post.return_value = response(status=503, content=b"busy")

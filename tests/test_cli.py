@@ -139,21 +139,39 @@ class CommandMappingTest(unittest.TestCase):
     def test_set_tags(self):
         self.assertEqual(Run(["problem", "set-tags", "9", "dp", "greedy"]).call[1]["tags"], "dp,greedy")
 
-    def test_set_tags_without_tags_clears_with_comma(self):
+    def test_set_tags_clear_sends_a_comma(self):
         # Polygon rejects tags="" ("Field should not be empty"); "," clears (verified on real Polygon).
-        self.assertEqual(Run(["problem", "set-tags", "9"]).call[1]["tags"], ",")
+        self.assertEqual(Run(["problem", "set-tags", "9", "--clear"]).call[1]["tags"], ",")
+        for argv in (["problem", "set-tags", "9"], ["problem", "set-tags", "9", "dp", "--clear"]):
+            r = Run(argv)
+            self.assertEqual((r.code, r.calls), (2, []))
+            self.assertIn("--clear", r.stderr)
 
     def test_text_file_keeps_crlf_verbatim(self):
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "legend.tex").write_bytes("Даны $n$\r\nчисел &=?#\n".encode())
-            r = Run(["statement", "save", "9", "--legend", f"@{tmp}/legend.tex"])
+            r = Run(["statement", "save", "9", "--legend-file", f"{tmp}/legend.tex"])
         self.assertEqual(r.call[1]["legend"], "Даны $n$\r\nчисел &=?#\n")
+
+    def test_text_is_literal_even_with_an_at_sign(self):
+        self.assertEqual(Run(["statement", "save", "9", "--legend", "@home"]).call[1]["legend"], "@home")
+
+    def test_text_and_text_file_are_exclusive(self):
+        r = Run(["statement", "save", "9", "--legend", "x", "--legend-file", "-"], stdin=b"y")
+        self.assertEqual((r.code, r.calls), (2, []))
+        self.assertIn("not allowed with argument", r.stderr)
+
+    def test_double_dash_ends_options(self):
+        r = Run(["problem", "set-description", "9", "--", "--looks-like-an-option"])
+        self.assertEqual(r.call[1]["description"], "--looks-like-an-option")
+        r = Run(["problem", "set-description", "9", "--file", "-"], stdin="Описание".encode())
+        self.assertEqual(r.call[1]["description"], "Описание")
 
     def test_text_file_must_be_utf8(self):
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "bad.tex").write_bytes(b"\xff\xfe")
             with redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as ctx:
-                cli.main(["statement", "save", "9", "--legend", f"@{tmp}/bad.tex"])
+                cli.main(["statement", "save", "9", "--legend-file", f"{tmp}/bad.tex"])
         self.assertEqual(ctx.exception.code, 2)
         self.assertIn("bad.tex", err.getvalue())
 
@@ -167,7 +185,7 @@ class CommandMappingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "legend.tex").write_text("Given $n$ numbers.", encoding="utf-8")
             r = Run(["statement", "save", "9", "--lang", "english", "--name", "Sum",
-                     "--legend", f"@{tmp}/legend.tex", "--input", "@-"], stdin="One line.".encode())
+                     "--legend-file", f"{tmp}/legend.tex", "--input-file", "-"], stdin="One line.".encode())
         method, params = r.call
         self.assertEqual(method, "problem.saveStatement")
         self.assertEqual(params["legend"], "Given $n$ numbers.")
@@ -199,13 +217,14 @@ class CommandMappingTest(unittest.TestCase):
             path = Path(tmp, "testlib.h")
             path.write_bytes(b"//")
             params = Run(["file", "upload", "9", str(path), "--type", "resource", "--for-types", "cpp.*",
-                          "--stages", "COMPILE", "RUN", "--assets", "VALIDATOR", "CHECKER"]).call[1]
+                          "--stage", "COMPILE", "--stage", "RUN", "--asset", "VALIDATOR",
+                          "--asset", "CHECKER"]).call[1]
         self.assertEqual((params["forTypes"], params["stages"], params["assets"]),
                          ("cpp.*", "COMPILE;RUN", "VALIDATOR;CHECKER"))
 
     def test_upload_from_stdin_requires_name(self):
         r = Run(["solution", "upload", "9", "-", "--tag", "MA"])
-        self.assertEqual(r.code, 1)
+        self.assertEqual(r.code, 2)
         self.assertIn("--name", r.stderr)
 
     def test_missing_upload_file_is_reported(self):
@@ -263,6 +282,9 @@ class CommandMappingTest(unittest.TestCase):
 
     def test_test_delete(self):
         r = Run(["test", "delete", "9", "4", "6", "--testset", "pretests"])
+        self.assertEqual((r.code, r.calls), (2, []))
+        self.assertIn("--yes", r.stderr)
+        r = Run(["test", "delete", "9", "4", "6", "--testset", "pretests", "-y"])
         self.assertEqual(r.call, ("problem.deleteTest",
                                   {"problemId": 9, "pin": None, "testset": "pretests", "testIndices": "4,6"}))
 
@@ -272,13 +294,20 @@ class CommandMappingTest(unittest.TestCase):
 
     def test_groups_and_points(self):
         self.assertEqual(Run(["test", "enable-groups", "9"]).call[1]["enable"], True)
-        self.assertEqual(Run(["test", "enable-points", "9", "--disable"]).call[1]["enable"], False)
-        r = Run(["test", "save-group", "9", "g2", "--points-policy", "COMPLETE_GROUP",
-                 "--feedback-policy", "ICPC", "--dependencies", "g0", "g1"])
+        self.assertEqual(Run(["test", "disable-groups", "9"]).call[1]["enable"], False)
+        self.assertEqual(Run(["test", "disable-points", "9"]).call, ("problem.enablePoints",
+                                                                    {"problemId": 9, "pin": None, "enable": False}))
+        self.assertEqual(Run(["test", "enable-points", "9", "--disable"]).code, 2)  # old spelling is gone
+        r = Run(["test", "set-group-policy", "9", "g2", "--points-policy", "COMPLETE_GROUP",
+                 "--feedback-policy", "ICPC", "--dependency", "g0", "--dependency", "g1"])
         self.assertEqual(r.call[1], {"problemId": 9, "pin": None, "testset": "tests", "group": "g2",
                                      "pointsPolicy": "COMPLETE_GROUP", "feedbackPolicy": "ICPC",
                                      "dependencies": "g0,g1"})
-        r = Run(["test", "set-group", "9", "g2", "3", "4", "5"])
+        self.assertIsNone(Run(["test", "set-group-policy", "9", "g2", "--feedback-policy", "ICPC"])
+                          .call[1]["dependencies"])
+        self.assertEqual(Run(["test", "set-group-policy", "9", "g2", "--no-dependencies"])
+                         .call[1]["dependencies"], "")
+        r = Run(["test", "assign-group", "9", "g2", "3", "4", "5"])
         self.assertEqual(r.call, ("problem.setTestGroup", {"problemId": 9, "pin": None, "testset": "tests",
                                                            "testGroup": "g2", "testIndices": "3,4,5"}))
 
@@ -309,9 +338,9 @@ class CommandMappingTest(unittest.TestCase):
     def test_raw_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "s.txt").write_bytes(b"data")
-            r = Run(["call", "problem.saveFile", "problemId=9", "type=aux", f"file=@{tmp}/s.txt"])
+            r = Run(["call", "problem.saveFile", "problemId=9", "type=aux", "--file", f"file={tmp}/s.txt"])
         self.assertEqual(r.call, ("problem.saveFile",
-                                  {"raw": False, "problemId": "9", "type": "aux", "file": b"data"}))
+                                  {"raw": None, "problemId": "9", "type": "aux", "file": b"data"}))
 
     def test_raw_call_rejects_malformed_param(self):
         r = Run(["call", "problem.info", "problemId"])
@@ -353,16 +382,20 @@ class CommandMappingTest(unittest.TestCase):
         self.assertEqual(buffer.getvalue().decode("utf-8"), "Задача 题目\n")
 
     def test_raw_call_missing_file_is_usage_error(self):
-        r = Run(["call", "problem.saveFile", "problemId=1", "file=@/nonexistent/x.cpp"])
+        r = Run(["call", "problem.saveFile", "problemId=1", "--file", "file=/nonexistent/x.cpp"])
         self.assertEqual(r.code, 2)
         self.assertIn("x.cpp", r.stderr)
 
     def test_raw_call_reads_stdin(self):
-        r = Run(["call", "problem.saveFile", "problemId=1", "file=@-"], stdin=b"abc")
-        self.assertEqual(r.call, ("problem.saveFile", {"raw": False, "problemId": "1", "file": b"abc"}))
+        r = Run(["call", "problem.saveFile", "problemId=1", "--file", "file=-"], stdin=b"abc")
+        self.assertEqual(r.call, ("problem.saveFile", {"raw": None, "problemId": "1", "file": b"abc"}))
+
+    def test_raw_call_params_are_literal(self):
+        r = Run(["call", "problem.saveNote", "problemId=1", "note=@not-a-file"])
+        self.assertEqual(r.call[1]["note"], "@not-a-file")
 
     def test_stdin_twice_is_rejected(self):
-        r = Run(["statement", "save", "1", "--legend", "@-", "--input", "@-"], stdin=b"x")
+        r = Run(["statement", "save", "1", "--legend-file", "-", "--input-file", "-"], stdin=b"x")
         self.assertEqual(r.code, 2)
         self.assertIn("only once", r.stderr)
         self.assertEqual(r.calls, [])
@@ -381,8 +414,9 @@ class NewFamiliesTest(unittest.TestCase):
 
     def test_access(self):
         self.assertCall(["access", "list", "9"], "problem.accesses")
-        self.assertCall(["access", "set", "9", "alice", "WRITE"], "problem.setAccess", login="alice",
+        self.assertCall(["access", "set", "9", "alice", "WRITE", "--yes"], "problem.setAccess", login="alice",
                         accessType="WRITE")
+        self.assertEqual(Run(["access", "set", "9", "alice", "WRITE"]).code, 2)
         self.assertEqual(Run(["access", "set", "9", "alice", "OWNER"]).code, 2)
 
     def test_note(self):
@@ -393,10 +427,13 @@ class NewFamiliesTest(unittest.TestCase):
         r = Run(["issue", "list", "9", "--open", "--json"],
                 result=[{"id": 1, "status": "OPENED"}, {"id": 2, "status": "CLOSED"}, {"id": 3, "status": "REOPENED"}])
         self.assertEqual([i["id"] for i in json.loads(r.out)], [1, 3])
-        self.assertCall(["issue", "add", "9", "--type", "BUG", "--content", "Test 5 is invalid"],
+        r = Run(["issue", "add", "9", "--type", "BUG", "--content", "x"])
+        self.assertEqual((r.code, r.calls), (2, []))
+        self.assertIn("e-mails", r.stderr)
+        self.assertCall(["issue", "add", "9", "--type", "BUG", "--content", "Test 5 is invalid", "-y"],
                         "problem.addIssue", type="BUG", content="Test 5 is invalid", assignee=None)
         self.assertCall(["issue", "update", "9", "12", "--status", "CLOSED", "--comment", "fixed",
-                         "--assignee", ""], "problem.updateIssue", issueId=12, comment="fixed",
+                         "--assignee", "", "--yes"], "problem.updateIssue", issueId=12, comment="fixed",
                         status="CLOSED", type=None, assignee="")
 
     def test_materials(self):
@@ -405,7 +442,9 @@ class NewFamiliesTest(unittest.TestCase):
         self.assertCall(["material", "set", "9", "sols", "--publish-strategy", "WITH_TUTORIAL", "--items", items,
                          "--rename-from", "old"], "problem.setMaterial", name="sols", originalName="old",
                         publishStrategy="WITH_TUTORIAL", items=items)
-        self.assertCall(["material", "remove", "9", "sols"], "problem.setMaterial", name="sols", remove=True)
+        self.assertCall(["material", "remove", "9", "sols", "--yes"], "problem.setMaterial", name="sols",
+                        remove=True)
+        self.assertEqual(Run(["material", "remove", "9", "sols"]).code, 2)
 
     def test_render_statements_saves_files(self):
         result = {"revision": 3, "statements": [
@@ -413,20 +452,22 @@ class NewFamiliesTest(unittest.TestCase):
              "pdf": {"status": "FAILED", "message": "LaTeX error"}}], "tutorials": []}
         with tempfile.TemporaryDirectory() as tmp:
             r = Run(["statement", "render", "9", "--save-dir", tmp, "--json"], result=result)
+            self.assertEqual(r.code, 1)  # the PDF failed; the result is still printed
             self.assertEqual(r.call, ("problem.renderStatements", dict(self.P, includeContent=True)))
             self.assertEqual(Path(tmp, "statement-english.html").read_bytes(), b"<h1>")
             out = json.loads(r.out)
             self.assertNotIn("contentBase64", out["statements"][0]["html"])
             self.assertEqual(out["statements"][0]["html"]["path"], str(Path(tmp, "statement-english.html")))
-        r = Run(["statement", "render", "9", "--strict"], result={"statements": [
+        r = Run(["statement", "render", "9"], result={"statements": [
             {"language": "english", "html": {"status": "OK"}, "pdf": {"status": "FAILED", "message": "LaTeX"}}]})
         self.assertEqual(r.code, 1)
         self.assertIn("english pdf: LaTeX", r.stderr)
 
     def test_script_preview_and_percent(self):
-        self.assertCall(["test", "clear-script", "9"], "problem.clearScript", testset="tests")
+        self.assertEqual(Run(["test", "clear-script", "9"]).code, 2)
+        self.assertCall(["test", "clear-script", "9", "--yes"], "problem.clearScript", testset="tests")
         self.assertCall(["test", "preview", "9", "--testset", "pre"], "problem.previewTests", testset="pre")
-        self.assertCall(["test", "enable-checker-percent", "9", "--disable"],
+        self.assertCall(["test", "disable-checker-percent", "9"],
                         "problem.enableTreatPointsFromCheckerAsPercent", enable=False)
 
 
