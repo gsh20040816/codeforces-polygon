@@ -1,29 +1,23 @@
 [project]
 name = "cf-polygon-mcp"
-version = "0.13.0"
-description = "基于 Codeforces Polygon API 的 MCP 工具集"
+version = "1.0.0.dev0"
+description = "Codeforces Polygon API 命令行客户端（面向 agent），附带 agent skill"
 readme = "README.md"
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp[cli]>=1.6.0",
-    "pydantic>=2.0.0",
     "requests>=2.32.3",
 ]
 
 [project.scripts]
-cf-polygon-mcp = "main:serve_cli"
-
-[tool.setuptools]
-py-modules = ["main"]
+cf-polygon = "cf_polygon.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["src*"]
-namespaces = false
+where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = ["src"]
 
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
