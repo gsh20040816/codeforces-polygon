@@ -73,6 +73,22 @@ class HelpTest(unittest.TestCase):
             cli.main(["problem", "info"])
         self.assertEqual(ctx.exception.code, 2)
 
+    def test_usage_error_is_json_with_json(self):
+        r = Run(["problem", "info", "--json"])
+        self.assertEqual(r.code, 2)
+        self.assertIn("problem_id", json.loads(r.stderr)["error"])
+        r = Run(["problem", "info", "x", "--json"])  # argparse type errors too
+        self.assertEqual(r.code, 2)
+        self.assertIn("invalid int value", json.loads(r.stderr)["error"])
+        r = Run(["problem", "info"])
+        self.assertEqual(r.code, 2)
+        self.assertIn("usage: polygonctl", r.stderr)
+
+    def test_version(self):
+        r = Run(["--version"])
+        self.assertEqual(r.code, 0)
+        self.assertRegex(r.out, r"^polygonctl \S+\n$")
+
 
 class OutputTest(unittest.TestCase):
     def test_json_output(self):
@@ -86,8 +102,8 @@ class OutputTest(unittest.TestCase):
         self.assertEqual(r.out, "id\tname\n1\ta\n2\tb\\tc\n")
 
     def test_none_result_prints_ok_in_json_and_nothing_in_text(self):
-        self.assertEqual(json.loads(Run(["problem", "commit", "1", "--json"]).out), {"ok": True})
-        self.assertEqual(Run(["problem", "commit", "1"]).out, "")
+        self.assertEqual(json.loads(Run(["problem", "commit", "1", "--minor", "--json"]).out), {"ok": True})
+        self.assertEqual(Run(["problem", "commit", "1", "--minor"]).out, "")
 
     def test_raw_content_goes_to_stdout(self):
         r = Run(["test", "input", "1", "3"], result=b"5\n1 2 3 4 5\n")
@@ -103,6 +119,24 @@ class OutputTest(unittest.TestCase):
         meta = json.loads(r.out)
         self.assertEqual(meta["size"], 4)
         self.assertEqual(len(meta["sha256"]), 64)
+
+    def test_output_dash_means_stdout(self):
+        r = Run(["test", "input", "1", "3", "-o", "-"], result=b"5\n")
+        self.assertEqual((r.code, r.stdout), (0, b"5\n"))
+        self.assertFalse(Path("-").exists())
+
+    def test_call_output_file_takes_any_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp, "info.json")
+            r = Run(["call", "problem.info", "problemId=1", "-o", str(target), "--json"],
+                    result={"timeLimit": 1000})
+            self.assertEqual(r.code, 0)
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"timeLimit": 1000})
+            meta = json.loads(r.out)
+            self.assertEqual((meta["path"], meta["size"]), (str(target), target.stat().st_size))
+            r = Run(["call", "problem.viewTags", "problemId=1", "-o", str(target)], result=["dp", "greedy"])
+            self.assertEqual(r.out, f"{target}\n")
+            self.assertEqual(target.read_text(encoding="utf-8"), "dp\ngreedy\n")
 
     def test_polygon_error_goes_to_stderr_with_exit_1(self):
         r = Run(["problem", "info", "1"], side_effect=PolygonError("problem.info: Access denied"))
@@ -130,11 +164,23 @@ class CommandMappingTest(unittest.TestCase):
         r = Run(["problem", "update-info", "9", "--time-limit", "2000", "--no-interactive", "--pin", "x"])
         self.assertEqual(r.call[1], {"problemId": 9, "pin": "x", "inputFile": None, "outputFile": None,
                                      "timeLimit": 2000, "memoryLimit": None, "interactive": False})
+        r = Run(["problem", "update-info", "9", "--input-name", "input.txt", "--output-name", "stdout"])
+        self.assertEqual((r.call[1]["inputFile"], r.call[1]["outputFile"]), ("input.txt", "stdout"))
+        self.assertEqual(Run(["problem", "update-info", "9", "--input-file", "stdin"]).code, 2)  # old spelling
 
     def test_commit(self):
         r = Run(["problem", "commit", "9", "-m", "fix tests", "--minor"])
         self.assertEqual(r.call, ("problem.commitChanges",
                                   {"problemId": 9, "pin": None, "minorChanges": True, "message": "fix tests"}))
+
+    def test_commit_that_e_mails_needs_yes(self):
+        r = Run(["problem", "commit", "9", "-m", "release"])
+        self.assertEqual((r.code, r.calls), (2, []))
+        self.assertIn("--minor", r.stderr)
+        self.assertIn("--yes", r.stderr)
+        r = Run(["problem", "commit", "9", "-m", "release", "--yes"])
+        self.assertEqual(r.call, ("problem.commitChanges",
+                                  {"problemId": 9, "pin": None, "minorChanges": None, "message": "release"}))
 
     def test_set_tags(self):
         self.assertEqual(Run(["problem", "set-tags", "9", "dp", "greedy"]).call[1]["tags"], "dp,greedy")
@@ -185,11 +231,15 @@ class CommandMappingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "legend.tex").write_text("Given $n$ numbers.", encoding="utf-8")
             r = Run(["statement", "save", "9", "--lang", "english", "--name", "Sum",
-                     "--legend-file", f"{tmp}/legend.tex", "--input-file", "-"], stdin="One line.".encode())
+                     "--legend-file", f"{tmp}/legend.tex", "--input-format-file", "-",
+                     "--output-format", "One number."], stdin="One line.".encode())
         method, params = r.call
         self.assertEqual(method, "problem.saveStatement")
         self.assertEqual(params["legend"], "Given $n$ numbers.")
         self.assertEqual(params["input"], "One line.")
+        self.assertEqual(params["output"], "One number.")
+        self.assertFalse(Path("One number.").exists())  # the section is not mistaken for -o FILE
+        self.assertEqual(Run(["statement", "save", "9", "--input", "x"]).code, 2)  # old spelling
         self.assertEqual(params["name"], "Sum")
         self.assertEqual(params["encoding"], "UTF-8")
         self.assertIsNone(params["notes"])
@@ -257,11 +307,14 @@ class CommandMappingTest(unittest.TestCase):
                 self.assertEqual(r.call, (method, {"problemId": 9, "pin": None, role: f"{role}.cpp"}))
 
     def test_checker_save_test(self):
-        r = Run(["checker", "save-test", "9", "1", "--input", "1", "--output", "2", "--answer", "3",
+        r = Run(["checker", "save-test", "9", "1", "--input", "1", "--contestant-output", "2", "--answer", "3",
                  "--verdict", "WRONG_ANSWER"])
         self.assertEqual(r.call[1], {"problemId": 9, "pin": None, "testIndex": 1, "testInput": "1",
                                      "testOutput": "2", "testAnswer": "3", "testVerdict": "WRONG_ANSWER",
                                      "checkExisting": None})
+        r = Run(["checker", "save-test", "9", "1", "--input", "1", "--output", "2", "--answer", "3",
+                 "--verdict", "OK"])
+        self.assertEqual(r.code, 2)  # old spelling
 
     def test_validator_save_test(self):
         r = Run(["validator", "save-test", "9", "2", "--input", "0\n", "--verdict", "INVALID"])
@@ -288,9 +341,11 @@ class CommandMappingTest(unittest.TestCase):
         self.assertEqual(r.call, ("problem.deleteTest",
                                   {"problemId": 9, "pin": None, "testset": "pretests", "testIndices": "4,6"}))
 
-    def test_save_script_from_stdin(self):
-        r = Run(["test", "save-script", "9", "-"], stdin=b"gen 1 > 2\ngen 2 > $\n")
-        self.assertEqual(r.call[1]["source"], b"gen 1 > 2\ngen 2 > $\n")
+    def test_upload_script_from_stdin(self):
+        r = Run(["test", "upload-script", "9", "-"], stdin=b"gen 1 > 2\ngen 2 > $\n")
+        self.assertEqual(r.call, ("problem.saveScript", {"problemId": 9, "pin": None, "testset": "tests",
+                                                         "source": b"gen 1 > 2\ngen 2 > $\n"}))
+        self.assertEqual(Run(["test", "save-script", "9", "-"]).code, 2)  # old name
 
     def test_groups_and_points(self):
         self.assertEqual(Run(["test", "enable-groups", "9"]).call[1]["enable"], True)
@@ -305,8 +360,9 @@ class CommandMappingTest(unittest.TestCase):
                                      "dependencies": "g0,g1"})
         self.assertIsNone(Run(["test", "set-group-policy", "9", "g2", "--feedback-policy", "ICPC"])
                           .call[1]["dependencies"])
-        self.assertEqual(Run(["test", "set-group-policy", "9", "g2", "--no-dependencies"])
+        self.assertEqual(Run(["test", "set-group-policy", "9", "g2", "--clear-dependencies"])
                          .call[1]["dependencies"], "")
+        self.assertEqual(Run(["test", "set-group-policy", "9", "g2", "--no-dependencies"]).code, 2)
         r = Run(["test", "assign-group", "9", "g2", "3", "4", "5"])
         self.assertEqual(r.call, ("problem.setTestGroup", {"problemId": 9, "pin": None, "testset": "tests",
                                                            "testGroup": "g2", "testIndices": "3,4,5"}))
@@ -361,14 +417,15 @@ class CommandMappingTest(unittest.TestCase):
         self.assertEqual(r.code, 2)
 
     def test_commit_conflict_is_an_error(self):
-        r = Run(["problem", "commit", "9"], result={"committed": False, "conflictOccurred": True,
+        r = Run(["problem", "commit", "9", "--yes"], result={"committed": False, "conflictOccurred": True,
                                                     "message": "Conflict in statements"})
         self.assertEqual(r.code, 1)
         self.assertIn("Conflict in statements", r.stderr)
 
     def test_problem_check_exits_1_when_not_ready(self):
-        ready = {"problem_id": 9, "ready": True, "errors": [], "warnings": ["no READY package yet"]}
-        not_ready = {"problem_id": 9, "ready": False, "errors": ["no statement"], "warnings": []}
+        ready = {"problem_id": 9, "ready": True, "errors": [], "warnings": ["no checker tests"],
+                 "info": ["no READY package yet"]}
+        not_ready = {"problem_id": 9, "ready": False, "errors": ["no statement"], "warnings": [], "info": []}
         with patch("codeforces_polygon.cli.workflow.check_problem", return_value=ready) as check:
             r = Run(["problem", "check", "9", "--json"])
         self.assertEqual((r.code, json.loads(r.out), r.stderr), (0, ready, ""))
@@ -377,15 +434,18 @@ class CommandMappingTest(unittest.TestCase):
             r = Run(["problem", "check", "9", "--json"])
         self.assertEqual(r.code, 1)
         self.assertEqual(json.loads(r.out), not_ready)
-        self.assertIn("1 error(s)", r.stderr)
+        self.assertEqual(json.loads(r.stderr), {"error": "problem check: not ready, 1 error(s)"})
         with patch("codeforces_polygon.cli.workflow.check_problem", return_value=not_ready):
             r = Run(["problem", "check", "9"])
         self.assertEqual(r.code, 1)
         self.assertIn("ready: False", r.out)
         self.assertIn("no statement", r.out)
+        with patch("codeforces_polygon.cli.workflow.check_problem", side_effect=PolygonError("boom")):
+            r = Run(["problem", "check", "9", "--json"])
+        self.assertEqual((r.code, r.out), (1, ""))  # did not run: nothing on stdout
 
     def test_commit_without_changes_is_ok(self):
-        r = Run(["problem", "commit", "9", "--json"], result={"committed": False, "conflictOccurred": False,
+        r = Run(["problem", "commit", "9", "--minor", "--json"], result={"committed": False, "conflictOccurred": False,
                                                               "message": "No changes"})
         self.assertEqual(r.code, 0)
         self.assertEqual(json.loads(r.out)["message"], "No changes")
@@ -413,7 +473,7 @@ class CommandMappingTest(unittest.TestCase):
         self.assertEqual(r.call[1]["note"], "@not-a-file")
 
     def test_stdin_twice_is_rejected(self):
-        r = Run(["statement", "save", "1", "--legend-file", "-", "--input-file", "-"], stdin=b"x")
+        r = Run(["statement", "save", "1", "--legend-file", "-", "--input-format-file", "-"], stdin=b"x")
         self.assertEqual(r.code, 2)
         self.assertIn("only once", r.stderr)
         self.assertEqual(r.calls, [])

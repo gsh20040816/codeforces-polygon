@@ -361,13 +361,46 @@ class TestsetTest(SyncTestCase):
         self.assertTrue(again["ok"], steps(again, "failed"))
         self.assertEqual(fake.writes, [])
 
+    def test_fake_moves_dollar_tests_after_delete_test(self):
+        # As seen on Polygon: deleting a manual test lets the `$` tests move down to the freed index.
+        fake = FakePolygon()
+        fake.api_saveTest("tests", 1, testInput="1")
+        fake.api_saveScript("tests", "gen 1 > $\ngen 2 > $\n")
+        fake.api_setTestGroup("tests", "g", "3")
+        self.assertEqual({i: t["manual"] for i, t in fake.tests.items()}, {1: True, 2: False, 3: False})
+        fake.api_deleteTest("tests", "1")
+        self.assertEqual({i: (t["line"], t.get("group")) for i, t in fake.tests.items()},
+                         {1: ("gen 1", None), 2: ("gen 2", "g")})
+
+    def test_deleting_a_manual_test_after_the_dollar_tests_needs_no_script_reset(self):
+        fake = self.synced()
+        fake.api_saveTest("tests", 3, testInput="9")  # remote-only manual test after the `$` test at 2
+        fake.calls.clear()
+        _, result = run(self.root, fake, only=["tests"], prune=True)
+        self.assertTrue(result["ok"], steps(result, "failed"))
+        self.assertEqual(fake.writes, ["problem.deleteTest"])  # the `$` test stays at 2: no clearScript
+        self.assertEqual({i: t["manual"] for i, t in fake.tests.items()}, {1: True, 2: False})
+        fake.calls.clear()
+        _, again = run(self.root, fake, prune=True)
+        self.assertTrue(again["ok"], steps(again, "failed"))
+        self.assertEqual(fake.writes, [])
+
     def test_unpruned_manual_test_in_the_way_fails_before_writing(self):
         fake = self.dollar_problem()
         for options in ({}, {"dry_run": True}):
             _, result = run(self.root, fake, **options)
             self.assertFalse(result["ok"])
             self.assertIn("remote manual tests [2] sit where the script puts generated tests", json.dumps(result))
+            self.assertIn("(--delete-extra-tests)", json.dumps(result))
             self.assertEqual(fake.writes, [])
+
+    def test_blocked_prune_without_a_manual_tests_key_suggests_adding_it(self):
+        fake = self.dollar_problem()
+        edit_config(self.root, lambda c: c["testsets"][0].pop("manualTests"))
+        _, result = run(self.root, fake, prune=True)
+        self.assertFalse(result["ok"])
+        self.assertIn('add a \\"manualTests\\" key to the testset so --delete-extra-tests can delete them',
+                      json.dumps(result))
 
     def test_prune_without_a_manual_tests_key_deletes_nothing(self):
         fake = self.synced()
@@ -478,7 +511,16 @@ class CommandTest(SyncTestCase):
         fake = FakePolygon()
         self.assertEqual(self.cli(["push", str(self.root)], fake)[0], 0)
         fake.tests[7] = {"manual": True, "input": "x\n"}
-        code, _, _ = self.cli(["push", str(self.root), "--only", "tests", "--delete-extra-tests"], fake)
+        fake.calls.clear()
+        code, _, err = self.cli(["push", str(self.root), "--only", "tests", "--delete-extra-tests"], fake)
+        self.assertEqual((code, fake.calls), (2, []))  # deleting needs --yes
+        self.assertIn("--yes", err)
+        code, out, _ = self.cli(["push", str(self.root), "--only", "tests", "--delete-extra-tests", "-n",
+                                 "--json"], fake)
+        self.assertEqual(code, 0)  # a dry run deletes nothing, so it needs no --yes
+        self.assertIn("problem.deleteTest", out)
+        self.assertIn(7, fake.tests)
+        code, _, _ = self.cli(["push", str(self.root), "--only", "tests", "--delete-extra-tests", "--yes"], fake)
         self.assertEqual(code, 0)
         self.assertNotIn(7, fake.tests)
         self.assertEqual(self.cli(["push", str(self.root), "--prune"], fake)[0], 2)  # old spelling is gone
@@ -488,10 +530,49 @@ class CommandTest(SyncTestCase):
         self.assertEqual(code, 2)
         self.assertIn("bogus", err)
 
-    def test_missing_config_exits_1(self):
-        code, _, err = self.cli(["push", self.tmp.name + "/nope"], FakePolygon())
+    def test_only_can_be_repeated(self):
+        fake = FakePolygon()
+        self.assertEqual(self.cli(["push", str(self.root)], fake)[0], 0)
+        code, out, _ = self.cli(["push", str(self.root), "--only", "tags", "--only", "info,description",
+                                 "--json"], fake)
+        self.assertEqual(code, 0)
+        self.assertEqual({s["section"] for s in json.loads(out)["steps"]} - {"problem"},
+                         {"tags", "info", "description"})
+
+    def test_bad_directory_or_config_is_a_usage_error(self):
+        empty = Path(self.tmp.name, "empty")
+        empty.mkdir()
+        bad = Path(self.tmp.name, "bad")
+        bad.mkdir()
+        (bad / "Config.json").write_text("{nope", encoding="utf-8")
+        nameless = Path(self.tmp.name, "nameless")
+        nameless.mkdir()
+        (nameless / "Config.json").write_text("{}", encoding="utf-8")
+        for path, message in ((self.tmp.name + "/nope", "no such directory"), (empty, "Config.json not found"),
+                              (bad, "invalid JSON"), (nameless, "neither problemId nor name")):
+            for extra in ([], ["-n"]):
+                with self.subTest(path=str(path), extra=extra):
+                    fake = FakePolygon()
+                    code, out, err = self.cli(["push", str(path), "--json", *extra], fake)
+                    self.assertEqual((code, out, fake.calls), (2, "", []))
+                    self.assertIn(message, json.loads(err)["error"])
+
+    def test_step_level_config_errors_stay_failed_steps(self):
+        edit_config(self.root, lambda c: c["validator"].update(source="validator/gone.cpp"))
+        code, out, _ = self.cli(["push", str(self.root), "--json"], FakePolygon())
         self.assertEqual(code, 1)
-        self.assertIn("Config.json", err)
+        result = json.loads(out)
+        self.assertFalse(result["ok"])
+        self.assertIn("gone.cpp", json.dumps([s for s in result["steps"] if s["status"] == "failed"]))
+
+    def test_pull_into_a_non_empty_directory_is_a_usage_error(self):
+        fake = FakePolygon()
+        code, out, err = self.cli(["pull", "501", str(self.root)], fake)
+        self.assertEqual((code, out, fake.calls), (2, "", []))
+        self.assertIn("not empty", err)
+        code, _, err = self.cli(["pull", "501", str(self.root / "Config.json")], fake)
+        self.assertEqual(code, 2)
+        self.assertIn("not a directory", err)
 
 
 if __name__ == "__main__":

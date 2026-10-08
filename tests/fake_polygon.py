@@ -6,8 +6,10 @@ a script's tests replace the old generated ones, groups exist only while a test 
 in them, ``viewTestGroup`` fails while groups are disabled, tests carry ``points``
 only while points are enabled, ``problem.interactor`` fails on non-interactive problems,
 a script with FreeMarker (even just a comment) takes only ``$`` targets,
-manual test inputs are normalized (blanks collapsed, ends trimmed, one EOL added), and
-``deleteTest`` leaves the other tests at their indices (holes are allowed).
+manual test inputs are normalized (blanks collapsed, ends trimmed, one EOL added),
+``deleteTest`` leaves the other manual tests at their indices (holes are allowed), and
+after it Polygon itself moves tests generated with ``> $`` to the indices the saved script
+now gives them.  (That generated tests keep their group when they move is assumed, not seen.)
 """
 
 import base64
@@ -35,6 +37,7 @@ class FakePolygon:
         self.roles = {"validator": "", "checker": "std::none", "interactor": ""}
         self.validator_tests, self.checker_tests = {}, {}
         self.tests, self.script = {}, ""
+        self.script_lines = []  # the parsed saved script, to re-place `$` tests after deleteTest
         self.groups_enabled = self.points_enabled = False
         self.policies = {}
         self.fail = {}  # method -> message, to inject errors
@@ -183,7 +186,17 @@ class FakePolygon:
         if "<#" in text(source) and any(line.indices is not None for line in lines):
             raise PolygonError("source: When using Freemarker it is only allowed to use $ as a test index.")
         self.api_clearScript(testset)
-        used, next_free = set(self.tests), 1
+        self._place(lines)
+        self.script_lines = lines
+        lines = [l for l in text(source).replace("\r\n", "\n").split("\n") if l.strip()]
+        if "<#" not in text(source):  # without FreeMarker Polygon also collapses blanks (and keeps LF)
+            self.script = "\n".join(" ".join(l.split()) for l in lines) + "\n"
+        else:
+            self.script = "\r\n".join(lines) + "\r\n"
+
+    def _place(self, lines, groups=None):
+        """Add the script's tests: ``$`` takes the smallest index not used yet."""
+        used, next_free, seq = set(self.tests), 1, 0
         for line in lines:
             if line.indices is None:
                 while next_free in used:
@@ -196,16 +209,15 @@ class FakePolygon:
                 if index in self.tests:
                     raise PolygonError(f"source: test {index} already exists")
                 used.add(index)
-                self.tests[index] = {"manual": False, "line": " ".join([line.generator] + line.args)}
-        lines = [l for l in text(source).replace("\r\n", "\n").split("\n") if l.strip()]
-        if "<#" not in text(source):  # without FreeMarker Polygon also collapses blanks (and keeps LF)
-            self.script = "\n".join(" ".join(l.split()) for l in lines) + "\n"
-        else:
-            self.script = "\r\n".join(lines) + "\r\n"
+                self.tests[index] = {"manual": False, "line": " ".join([line.generator] + line.args), "seq": seq}
+                if (groups or {}).get(seq):
+                    self.tests[index]["group"] = groups[seq]
+                seq += 1
 
     def api_clearScript(self, testset):
         self.tests = {i: t for i, t in self.tests.items() if t["manual"]}
         self.script = ""
+        self.script_lines = []
         self._drop_empty_groups()
 
     def api_saveTest(self, testset, testIndex, testInput=None, testGroup=None, testPoints=None,
@@ -228,6 +240,10 @@ class FakePolygon:
     def api_deleteTest(self, testset, testIndices):
         for index in map(int, testIndices.split(",")):
             del self.tests[index]
+        if any(line.indices is None for line in self.script_lines):  # `$` tests follow the free indices
+            groups = {t["seq"]: t.get("group") for t in self.tests.values() if not t["manual"]}
+            self.tests = {i: t for i, t in self.tests.items() if t["manual"]}
+            self._place(self.script_lines, groups)
         self._drop_empty_groups()
 
     def api_setTestGroup(self, testset, testGroup, testIndices):

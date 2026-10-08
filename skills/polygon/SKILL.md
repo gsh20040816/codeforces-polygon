@@ -29,28 +29,34 @@ polygonctl test save --help
   Write commands print `{"ok": true}` with `--json` when Polygon returns nothing.
 - stdout carries only the result; errors go to stderr (`{"error": ...}` with `--json`).
 - Exit status: `0` success; `1` the command failed (Polygon or network error, a failed `push` step, a
-  failed render, a `problem check` that found errors; for the last three the result is still printed to stdout); `2` bad usage (unknown option, missing or unreadable file named on the command
-  line, stdin used twice, missing `--yes`). Check the exit status, never parse prose.
+  failed render, a `problem check` that found errors; for the last three the result is still printed to
+  stdout — so with `--json`, JSON with `ready` on stdout means `problem check` ran, empty stdout means
+  it did not); `2` bad usage (unknown option, missing or unreadable file named on the command line,
+  stdin used twice, missing `--yes`, a missing/invalid `Config.json` or non-empty pull directory).
+  Check the exit status, never parse prose.
 - A text option `--X TEXT` takes the text literally (an `@` is just a character). Its twin
   `--X-file PATH` reads a UTF-8 file sent byte for byte; `PATH` `-` reads stdin (once per command).
   Commands whose text is positional (`problem set-description`, `problem set-tutorial`, `note set`)
   take `TEXT` or `--file PATH`. Prefer files for long LaTeX or test data.
 - Upload commands take a local `PATH` (or `-` for stdin with `--name`); the Polygon name defaults to
   the file's basename. Binary files (images) are fine.
-- Commands that delete things or notify people refuse to run without `-y`/`--yes` (exit 2):
-  `problem discard-working-copy`, `test delete`, `test clear-script`, `material remove`,
-  `issue add`, `issue update`, `access set`. Pass `--yes` only when the user asked for that action.
-- File content commands (`file view`, `solution view`, `test input/answer/script`,
-  `package download`) write raw bytes to stdout or `-o FILE`; with `-o FILE --json` they print
-  `{"path", "size", "sha256"}`, with `--json` alone `{"content": "..."}`.
+- Commands that delete data, notify people or are otherwise hard to undo refuse to run without
+  `-y`/`--yes` (exit 2): `problem discard-working-copy`, `problem commit` (unless `--minor`),
+  `test delete`, `test clear-script`, `material remove`, `issue add`, `issue update`, `access set`,
+  and `push --delete-extra-tests` (unless `-n`). Pass `--yes` only when the user asked for that action.
+- `-o FILE` writes the result to FILE and prints FILE (with `--json`: its path, size and sha256)
+  instead of the content; `-` means stdout. For bytes (file/solution/test/package/download) the
+  content is raw; for anything else (including `call`) it is what would have been printed
+  (JSON with `--json`). With `--json` alone, bytes become `{"content": "..."}`.
 - Testset defaults to `tests`; test indices are 1-based.
 
 ## How Polygon works (what trips agents up)
 
 - Every edit lands in your **working copy**. `problem commit` turns it into a revision.
   **Packages are built from the committed revision, and a build fails with uncommitted changes —
-  commit first.** Commits notify watchers unless `--minor`. A commit result with `committed: false`
-  and message "No changes" is normal; a conflict makes `problem commit` exit 1.
+  commit first.** Without `--minor` Polygon e-mails the problem's watchers, so `problem commit`
+  needs `--yes`; `--minor` sends no e-mails and needs no `--yes`. A commit result with
+  `committed: false` and message "No changes" is normal; a conflict makes `problem commit` exit 1.
 - If Polygon answers `WORKING_COPY_IS_OUTDATED` (someone committed meanwhile), run
   `problem update-working-copy` and redo your change.
 - Setters (`checker set`, `validator set`, `file upload`, `statement save`, `test save`, ...) are
@@ -64,7 +70,7 @@ polygonctl test save --help
   drops blank lines and collapses runs of blanks in a saved script. Any FreeMarker in the script —
   even a `<#-- comment -->` — makes Polygon accept only `$` targets. When manual tests are added or
   deleted, Polygon moves the `$` tests to the new free indices; manual tests keep their indices.
-  After `test save-script`, run `problem cautions` and look for `INVALID_TEST_SCRIPT`.
+  After `test upload-script`, run `problem cautions` and look for `INVALID_TEST_SCRIPT`.
 - `test input`/`test answer` need a main (`MA`) solution to exist, even for manual tests.
   They generate on demand; if a generator or validator crashes, the command
   exits 1 and the error text contains Polygon's message (often with the offending input).
@@ -83,6 +89,10 @@ polygonctl test save --help
 - Solution tags: `MA` main (exactly one), `OK` correct, `WA`/`TL`/`ML`/`RE`/`PE` expected failures,
   `TO` TL-or-OK, `TM` TL-or-ML, `RJ` any rejection, `NR` do not run. Extra (per-testset/group)
   tags use the same list without `MA`.
+- `package build` refuses to start (exit 1, nothing built) when no checker is set ("Checker is not
+  set") or when there is not exactly one `MA` solution ("Expected to find exactly one main (model)
+  solution"); `problem check` reports both as errors. Its `info` list holds notes such as
+  "no READY package yet", which are neither errors nor warnings.
 - `package build --wait` keeps waiting through flaky polls. If it times out, the build was still
   started: check `package list`, do not build again.
 
@@ -101,7 +111,7 @@ polygonctl push . --dry-run                           # what would change on Pol
 polygonctl push . --json                              # first run creates the problem, writes problemId
 polygonctl problem check 123456 --json                # exit 0 only when "errors" is empty
 polygonctl problem cautions 123456 --json
-polygonctl problem commit 123456 -m "initial version"
+polygonctl problem commit 123456 -m "initial version" --yes
 polygonctl package build 123456 --wait --json
 polygonctl package download 123456 987654 --type linux -o array-rotation.zip
 ```
@@ -110,12 +120,15 @@ polygonctl package download 123456 987654 --type linux -o array-rotation.zip
   `Config.schema.json`); keep exactly one `MA` solution.
 - `polyman verify` must pass before pushing: Polygon re-runs everything on its side, and a local
   failure is cheaper to fix.
-- `push` is one-way (local → Polygon working copy) and never commits. It reads Polygon first and
-  writes only what differs; after a successful run, running it again with no local changes reports
-  every step `unchanged`. Each step is one record in `steps` (`--json`), with `status` `ok` /
-  `unchanged` / `planned` / `warning` / `failed`; any failed step means exit 1, but the other steps
-  still run. `--dry-run` (`-n`) uses the same exit status; it cannot foresee a write that Polygon
-  itself rejects. `--only tests,solutions` limits it to some sections.
+- `push` is one-way (local → Polygon working copy) and never commits. It makes Polygon's working
+  copy match `Config.json`: remote edits are overwritten, the test script may be cleared and
+  re-saved (generated tests regenerate), and groups/points are switched as configured. It reads
+  Polygon first and writes only what differs; after a successful run, running it again with no
+  local changes reports every step `unchanged`. Each step is one record in `steps` (`--json`), with
+  `status` `ok` / `unchanged` / `planned` / `warning` / `failed`; any failed step means exit 1, but
+  the other steps still run. `--dry-run` (`-n`) uses the same exit status; it cannot foresee a write
+  that Polygon itself rejects. `--only tests,solutions` (or `--only tests --only solutions`) limits
+  it to some sections. A missing directory or a missing/invalid `Config.json` is exit 2.
 - If the first run creates the problem but cannot write `problemId` back, the failed step names the
   new id: add it to `Config.json` by hand, or the next run creates a second problem.
 - `push` covers what `polyman remote push` misses: group policies (`groups[].pointsPolicy`,
@@ -127,10 +140,12 @@ polygonctl package download 123456 987654 --type linux -o array-rotation.zip
   (so explicit `> N` targets work; `@group` headers are applied with `test assign-group`), numbers
   `$` tests like polyman, and checks Polygon's numbering afterwards (a mismatch is a failed step).
 - It never deletes files, solutions or statements (the API cannot); they show up as warnings.
-  Remote manual tests that `Config.json` lacks are reported too; `--delete-extra-tests` deletes them,
-  but only when the testset has a `manualTests` key (`"manualTests": []` deletes them all; a missing
-  key deletes nothing). Without it, a leftover manual test on an index the script needs fails the
-  testset before anything is written.
+  Remote manual tests that `Config.json` lacks are reported too; `--delete-extra-tests` deletes them
+  (needs `--yes` unless `-n`), but only when the testset has a `manualTests` key
+  (`"manualTests": []` deletes them all; a missing key deletes nothing — if you passed
+  `--delete-extra-tests` and a leftover manual test is in the way, the failed step tells you to add
+  the key). Without it, a leftover manual test on an index the script needs fails the testset before
+  anything is written.
 - When the remote generated tests are not where polyman numbers them (e.g. after a manual test was
   added or removed), `push` clears and re-saves the script.
 - Manual test inputs are compared the way Polygon stores them (see above), so a local file that
@@ -169,7 +184,8 @@ polygonctl test script 123456
 polygonctl validator show 123456
 polygonctl checker show 123456
 polygonctl file view 123456 gen.cpp -o gen.cpp
-polygonctl problem check 123456 --json           # exit 1 if "errors" is non-empty; warnings alone keep 0
+polygonctl problem check 123456 --json           # exit 1 if not ready ("errors" non-empty); warnings alone keep 0.
+                                                 # With --json: JSON with `ready` on stdout = it ran; empty stdout = it did not
 polygonctl problem cautions 123456 --json        # Polygon's own cautions / package-readiness issues
 polygonctl issue list 123456 --open --json       # reviewers' open issues
 ```
@@ -178,21 +194,21 @@ polygonctl issue list 123456 --open --json       # reviewers' open issues
 
 ```bash
 polygonctl problem create array-rotation --json  # note the returned "id"
-polygonctl problem update-info 123456 --input-file stdin --output-file stdout --time-limit 2000 --memory-limit 256
-polygonctl statement save 123456 --lang english --name "Array Rotation" --legend-file legend.tex --input-file input.tex --output-file output.tex --notes-file notes.tex
+polygonctl problem update-info 123456 --input-name stdin --output-name stdout --time-limit 2000 --memory-limit 256
+polygonctl statement save 123456 --lang english --name "Array Rotation" --legend-file legend.tex --input-format-file input.tex --output-format-file output.tex --notes-file notes.tex
 polygonctl file upload 123456 validator.cpp
 polygonctl validator set 123456 validator.cpp
 polygonctl checker set 123456 std::wcmp.cpp
 polygonctl file upload 123456 gen.cpp
 polygonctl test save 123456 1 --input-file sample1.txt --sample
-polygonctl test save-script 123456 script.txt
+polygonctl test upload-script 123456 script.txt
 polygonctl problem cautions 123456 --json        # INVALID_TEST_SCRIPT?
 polygonctl solution upload 123456 main.cpp --tag MA
 polygonctl solution upload 123456 brute.cpp --tag TL
 polygonctl solution upload 123456 wrong.cpp --tag WA
 polygonctl validator save-test 123456 1 --input "0" --verdict INVALID
 polygonctl problem check 123456 --json           # exit 1 until every entry in "errors" is fixed
-polygonctl problem commit 123456 -m "initial version"
+polygonctl problem commit 123456 -m "initial version" --yes
 polygonctl package build 123456 --wait --json    # READY → exit 0, FAILED → exit 1 with the reason
 ```
 
@@ -299,12 +315,13 @@ polygonctl call problem.saveFile problemId=123456 type=aux name=notes.txt --file
 ## Safety
 
 - Polygon problems are shared with co-authors. Destructive commands — `problem discard-working-copy`,
-  `test delete`, `test clear-script`, `push --delete-extra-tests`, `material remove`, overwriting an
-  existing file/solution/statement section, `test save-script` — change other people's work; do them
-  only when the user asked for that change. Run `push --dry-run` first on a problem someone else
-  also edits.
-- `problem commit` creates a permanent revision and (without `--minor`) notifies watchers; commit
-  when the user's request includes it or after confirming.
+  `test delete`, `test clear-script`, `push --delete-extra-tests` (needs `--yes` unless `-n`),
+  `material remove`, overwriting an existing file/solution/statement section, `test upload-script` —
+  change other people's work; do them only when the user asked for that change. Run `push --dry-run`
+  first on a problem someone else also edits.
+- `problem commit` creates a permanent revision. Without `--minor` it e-mails watchers and needs
+  `--yes`; with `--minor` it needs no `--yes`. Commit when the user's request includes it or after
+  confirming.
 - `issue add/update` and `access set` notify other people immediately; treat them like sending a
   message.
 - Never print `POLYGON_API_SECRET` or `POLYGON_PASSWORD`.

@@ -35,7 +35,7 @@ class DocExamplesTest(unittest.TestCase):
                         continue
                     args = parser.parse_args(tokens)
                     self.assertTrue(callable(args.handler))
-                    if hasattr(args, "yes"):  # examples must be runnable as written
+                    if cli.needs_yes(args):  # examples must be runnable as written
                         self.assertTrue(args.yes, "needs --yes")
         self.assertGreater(count, 40)
 

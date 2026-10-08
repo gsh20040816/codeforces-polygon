@@ -88,7 +88,8 @@ def check_problem(api: Polygon, problem_id: int, pin: str | None = None, testset
     """Inspect a problem and list what blocks or weakens a release.
 
     ``errors`` must be fixed before building a package; ``warnings`` are
-    worth a look.  API failures are raised, not reported as issues.
+    worth a look; ``info`` holds notes that are neither (such as no READY
+    package yet).  API failures are raised, not reported as issues.
     """
 
     def q(method: str, **params: Any) -> Any:
@@ -129,7 +130,8 @@ def check_problem(api: Polygon, problem_id: int, pin: str | None = None, testset
     if not validator:
         errors.append("validator is not set")
     if not checker:
-        warnings.append("checker is not set")
+        # Verified on Polygon: problem.buildPackage refuses with "Checker is not set".
+        errors.append("checker is not set")
     if interactive and not interactor:
         errors.append("interactive problem has no interactor")
     for role, name in [("validator", validator), ("checker", checker), ("interactor", interactor)] + [
@@ -186,7 +188,9 @@ def check_problem(api: Polygon, problem_id: int, pin: str | None = None, testset
     if not any(tags[tag] for tag in _ACCEPTED_TAGS):
         errors.append("no accepted solution")
     if tags["MA"] != 1:
-        warnings.append(f"expected exactly one main (MA) solution, found {tags['MA']}")
+        # Verified on Polygon: problem.buildPackage refuses with
+        # "Expected to find exactly one main (model) solution".
+        errors.append(f"expected exactly one main (MA) solution, found {tags['MA']}")
     wrong_kinds = [tag for tag in tags if tag not in _ACCEPTED_TAGS]
     if not wrong_kinds:
         warnings.append("no wrong/TL solutions")
@@ -197,10 +201,12 @@ def check_problem(api: Polygon, problem_id: int, pin: str | None = None, testset
         warnings.append("no validator tests")
     if checker and not checker.startswith("std::") and not q("problem.checkerTests"):
         warnings.append("no checker tests")
+    info_notes = []
     if not any(p.get("state") == "READY" for p in q("problem.packages") or []):
-        warnings.append("no READY package yet")
+        info_notes.append("no READY package yet")
 
-    return {"problem_id": problem_id, "ready": not errors, "errors": errors, "warnings": warnings}
+    return {"problem_id": problem_id, "ready": not errors, "errors": errors, "warnings": warnings,
+            "info": info_notes}
 
 
 def build_package_and_wait(

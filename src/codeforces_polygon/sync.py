@@ -422,9 +422,10 @@ class Sync:
                                                          "use --delete-extra-tests to delete them")
         blocked = [i for i in extra if i in generated and not prune]
         if blocked:
+            how = ('add a "manualTests" key to the testset so --delete-extra-tests can delete them'
+                   if self.prune else "delete them (--delete-extra-tests)")
             return self.fail("tests", f"{name}: script", f"remote manual tests {blocked} sit where the script "
-                             "puts generated tests; delete them (--delete-extra-tests) or add them to "
-                             "Config.json")
+                             f"puts generated tests; {how}, or add them to Config.json")
 
         # Re-save the script when its text changed, or when the same text would number the tests
         # differently now (a manual test added, moved or deleted shifts the `$` targets).
@@ -728,7 +729,7 @@ def pull(api: Polygon, problem_id: int, directory: str, pin: str | None = None) 
         headed = _with_group_headers(script, {t["index"] for t in tests if t.get("manual")}, generated_groups)
         if headed is None:
             warnings.append("generated tests have groups that <#-- @group --> headers cannot express for "
-                            "this script; add them before syncing back")
+                            "this script; add them before pushing")
         else:
             script = headed
     if script.strip():

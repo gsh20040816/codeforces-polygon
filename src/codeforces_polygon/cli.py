@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import sys
+from importlib import metadata
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,13 +22,17 @@ import requests
 
 from . import sync as polyman_sync, workflow
 from .client import Polygon, PolygonError, download
-from .polyman import ConfigError
+from .polyman import ConfigError, Problem
 
 EPILOG = """\
 Credentials: POLYGON_API_KEY / POLYGON_API_SECRET for API commands,
 POLYGON_LOGIN / POLYGON_PASSWORD for the `download` group.
 A TEXT option --X has a --X-file PATH twin that reads the text from a UTF-8 file
 (PATH - reads stdin, once per command). Use -- to end options.
+Commands that delete data, notify people or are otherwise hard to undo need -y/--yes:
+problem discard-working-copy, problem commit (unless --minor), test delete,
+test clear-script, material remove, issue add, issue update, access set, and
+push --delete-extra-tests (unless -n).
 Results go to stdout, errors to stderr. Exit status: 0 success, 1 failure, 2 usage error.
 Run `polygonctl <group> <command> --help` for details on any command."""
 
@@ -81,9 +86,6 @@ def read_text(path: str) -> str:
         raise argparse.ArgumentTypeError(f"{path}: not UTF-8 ({exc})") from None
 
 
-upload = read_bytes  # kept for the upload commands, which read PATH when they run
-
-
 def _key_value(value: str) -> tuple[str, str]:
     key, sep, val = value.partition("=")
     if not sep or not key:
@@ -102,8 +104,14 @@ def file_param(value: str) -> tuple[str, bytes]:
     return key, read_bytes(path)
 
 
+def needs_yes(a: argparse.Namespace) -> bool:
+    """Whether this command line needs --yes: always for commands with -y, unless a ``yes_rule`` says otherwise."""
+    rule = getattr(a, "yes_rule", None)
+    return rule(a) if rule else hasattr(a, "yes")
+
+
 def confirm(a: argparse.Namespace, what: str) -> None:
-    if not a.yes:
+    if needs_yes(a) and not a.yes:
         raise UsageError(f"{what}; pass --yes to confirm")
 
 
@@ -113,10 +121,6 @@ def upload_name(args: argparse.Namespace) -> str:
     if args.path == "-":
         raise UsageError("--name is required when reading from stdin")
     return Path(args.path).name
-
-
-def upload_data(args: argparse.Namespace) -> bytes:
-    return upload(args.path)
 
 
 def api() -> Polygon:
@@ -167,23 +171,33 @@ def render_text(value: Any) -> str:
     return str(value)
 
 
+def _formatted(result: Any, args: argparse.Namespace) -> str:
+    """The text form of a non-bytes result: JSON with --json, else the compact text form."""
+    if args.json:
+        return json.dumps({"ok": True} if result is None else result, ensure_ascii=False, indent=2)
+    return render_text(result)
+
+
 def emit(result: Any, args: argparse.Namespace) -> None:
-    output = getattr(args, "output", None)
+    output = getattr(args, "output_path", None)
+    if output and output != "-":  # -o - means stdout, like no -o
+        if isinstance(result, bytes):
+            data = result
+        else:
+            text = _formatted(result, args)
+            data = (text + "\n").encode("utf-8") if text else b""
+        Path(output).write_bytes(data)
+        meta = {"path": output, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        print(json.dumps(meta) if args.json else output)
+        return
     if isinstance(result, bytes):
-        if output:
-            Path(output).write_bytes(result)
-            meta = {"path": output, "size": len(result), "sha256": hashlib.sha256(result).hexdigest()}
-            print(json.dumps(meta) if args.json else output)
-        elif args.json:
+        if args.json:
             print(json.dumps({"content": result.decode("utf-8", "replace")}, ensure_ascii=False))
         else:
             sys.stdout.buffer.write(result)
             sys.stdout.flush()
         return
-    if args.json:
-        print(json.dumps({"ok": True} if result is None else result, ensure_ascii=False, indent=2))
-        return
-    rendered = render_text(result)
+    rendered = _formatted(result, args)
     if rendered:
         print(rendered)
 
@@ -203,7 +217,7 @@ def problem_info(a):
 
 
 def problem_update_info(a):
-    return pq(a, "problem.updateInfo", inputFile=a.input_file, outputFile=a.output_file,
+    return pq(a, "problem.updateInfo", inputFile=a.input_name, outputFile=a.output_name,
               timeLimit=a.time_limit, memoryLimit=a.memory_limit, interactive=a.interactive)
 
 
@@ -211,7 +225,7 @@ def problem_check(a):
     result = workflow.check_problem(api(), a.problem_id, a.pin, a.testset)
     if not result["ready"]:
         # warnings alone keep exit 0: they are advice, not a blocked release
-        raise Unfinished(f"problem check: {len(result['errors'])} error(s)", result)
+        raise Unfinished(f"problem check: not ready, {len(result['errors'])} error(s)", result)
     return result
 
 
@@ -220,6 +234,9 @@ def problem_cautions(a):
 
 
 def problem_commit(a):
+    if needs_yes(a) and not a.yes:
+        raise UsageError("commit e-mails the problem's watchers; pass --minor to skip the e-mails "
+                         "or --yes to confirm")
     result = pq(a, "problem.commitChanges", minorChanges=a.minor or None, message=a.message)
     if isinstance(result, dict) and result.get("conflictOccurred"):
         raise PolygonError(f"problem.commitChanges: {result.get('message') or 'conflict occurred'}")
@@ -324,7 +341,7 @@ def statement_list(a):
 
 def statement_save(a):
     return pq(a, "problem.saveStatement", lang=a.lang, encoding=a.encoding, name=a.name,
-              legend=a.legend, input=a.input, output=a.output, scoring=a.scoring,
+              legend=a.legend, input=a.input_format, output=a.output_format, scoring=a.scoring,
               interaction=a.interaction, notes=a.notes, tutorial=a.tutorial)
 
 
@@ -359,7 +376,7 @@ def statement_view_resource(a):
 
 
 def statement_upload_resource(a):
-    return pq(a, "problem.saveStatementResource", name=upload_name(a), file=upload_data(a),
+    return pq(a, "problem.saveStatementResource", name=upload_name(a), file=read_bytes(a.path),
               checkExisting=a.check_existing)
 
 
@@ -377,7 +394,7 @@ def file_view(a):
 
 
 def file_upload(a):
-    return pq(a, "problem.saveFile", type=a.type, name=upload_name(a), file=upload_data(a),
+    return pq(a, "problem.saveFile", type=a.type, name=upload_name(a), file=read_bytes(a.path),
               sourceType=a.source_type, forTypes=a.for_types,
               stages=";".join(a.stage) if a.stage else None,
               assets=";".join(a.asset) if a.asset else None,
@@ -395,7 +412,7 @@ def solution_view(a):
 
 
 def solution_upload(a):
-    return pq(a, "problem.saveSolution", name=upload_name(a), file=upload_data(a),
+    return pq(a, "problem.saveSolution", name=upload_name(a), file=read_bytes(a.path),
               tag=a.tag, sourceType=a.source_type, checkExisting=a.check_existing)
 
 
@@ -426,7 +443,7 @@ def validator_save_test(a):
 
 def checker_save_test(a):
     return pq(a, "problem.saveCheckerTest", testIndex=a.index, testInput=a.input,
-              testOutput=a.output_text, testAnswer=a.answer, testVerdict=a.verdict,
+              testOutput=a.contestant_output, testAnswer=a.answer, testVerdict=a.verdict,
               checkExisting=a.check_existing)
 
 
@@ -477,8 +494,8 @@ def switch(method: str, enable: bool, testset: bool = False) -> Callable:
     return lambda a: pq(a, method, enable=enable)
 
 
-def test_save_script(a):
-    return pq(a, "problem.saveScript", testset=a.testset, source=upload_data(a))
+def test_upload_script(a):
+    return pq(a, "problem.saveScript", testset=a.testset, source=read_bytes(a.path))
 
 
 def test_groups(a):
@@ -488,7 +505,7 @@ def test_groups(a):
 def test_save_group(a):
     return pq(a, "problem.saveTestGroup", testset=a.testset, group=a.group,
               pointsPolicy=a.points_policy, feedbackPolicy=a.feedback_policy,
-              dependencies=None if a.dependency is None and not a.no_dependencies
+              dependencies=None if a.dependency is None and not a.clear_dependencies
               else ",".join(a.dependency or []))
 
 
@@ -563,9 +580,24 @@ def sections(value: str) -> list[str]:
     return names
 
 
+def _problem_dir(path: str) -> Problem:
+    """Load DIR/Config.json; a missing directory or a bad Config.json is a usage error."""
+    if not Path(path).is_dir():
+        raise UsageError(f"{path}: no such directory")
+    try:
+        problem = Problem.load(path)
+    except ConfigError as exc:
+        raise UsageError(str(exc)) from None
+    if problem.config.get("problemId") is None and not problem.config.get("name"):
+        raise UsageError(f"{Path(path) / 'Config.json'} has neither problemId nor name")
+    return problem
+
+
 def push_dir(a):
-    result = polyman_sync.sync(api(), a.dir, dry_run=a.dry_run, prune=a.delete_extra_tests, only=a.only,
-                               pin=a.pin)
+    problem = _problem_dir(a.dir)
+    confirm(a, "this deletes remote manual tests that Config.json lacks")
+    result = polyman_sync.Sync(api(), problem, dry_run=a.dry_run, prune=a.delete_extra_tests, only=a.only,
+                               pin=a.pin).run()
     shown = result if a.json else result["steps"]
     if not result["ok"]:
         failed = [f"{s['section']}/{s['target']}: {s['detail']}" for s in result["steps"] if s["status"] == "failed"]
@@ -574,6 +606,11 @@ def push_dir(a):
 
 
 def pull_dir(a):
+    root = Path(a.dir)
+    if root.exists() and not root.is_dir():
+        raise UsageError(f"{root} is not a directory")
+    if root.is_dir() and any(root.iterdir()):
+        raise UsageError(f"{root} is not empty; pull writes only into a new or empty directory")
     return polyman_sync.pull(api(), a.problem_id, a.dir, pin=a.pin)
 
 
@@ -585,6 +622,25 @@ def _group(root, name: str, help: str):
     return parser.add_subparsers(dest="command", required=True, metavar="<command>")
 
 
+_json_errors = False  # set by main when --json is on the command line
+
+
+class Parser(argparse.ArgumentParser):
+    """Usage errors as ``{"error": ...}`` on stderr when --json was given; exit 2 either way."""
+
+    def error(self, message: str):
+        if _json_errors:
+            self.exit(2, json.dumps({"error": f"{self.prog}: {message}"}, ensure_ascii=False) + "\n")
+        super().error(message)
+
+
+def _version() -> str:
+    try:
+        return metadata.version("codeforces-polygon")
+    except metadata.PackageNotFoundError:
+        return "unknown"
+
+
 def _leaf(sub, name: str, handler: Callable, help: str, *, problem: bool = True,
           output: bool = False) -> argparse.ArgumentParser:
     parser = sub.add_parser(name, help=help, description=help, epilog=EPILOG,
@@ -593,8 +649,9 @@ def _leaf(sub, name: str, handler: Callable, help: str, *, problem: bool = True,
         parser.add_argument("problem_id", type=int, help="Polygon problem id")
         parser.add_argument("--pin", help="problem PIN, if the problem has one")
     if output:
-        parser.add_argument("-o", "--output", metavar="FILE",
-                            help="write content to FILE instead of stdout")
+        parser.add_argument("-o", "--output", dest="output_path", metavar="FILE",
+                            help="write the result to FILE and print FILE (with --json: its path, size "
+                                 "and sha256) instead of the content; - means stdout")
     parser.add_argument("--json", action="store_true", help="print the result as JSON")
     parser.set_defaults(handler=handler)
     return parser
@@ -632,17 +689,18 @@ def _check_existing(parser):
                         help="fail instead of overwriting if it already exists")
 
 
-def _yes(parser, what: str):
-    parser.add_argument("-y", "--yes", action="store_true", help=f"confirm: {what} (required)")
+def _yes(parser, what: str, when: str = "required"):
+    parser.add_argument("-y", "--yes", action="store_true", help=f"confirm: {what} ({when})")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = Parser(
         prog="polygonctl",
         description="Command-line client for the Codeforces Polygon API, designed for agents and scripts.",
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
     root = parser.add_subparsers(dest="group", required=True, metavar="<group>")
 
     # problem
@@ -656,21 +714,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name", help="problem name (lowercase letters, digits, dashes)")
     _leaf(g, "info", problem_info, "Show input/output files, limits and interactivity")
     p = _leaf(g, "update-info", problem_update_info, "Change files, limits or interactivity")
-    p.add_argument("--input-file", help="e.g. stdin")
-    p.add_argument("--output-file", help="e.g. stdout")
+    p.add_argument("--input-name", metavar="NAME", help="file the solution reads, e.g. stdin or input.txt")
+    p.add_argument("--output-name", metavar="NAME",
+                   help="file the solution writes, e.g. stdout or output.txt")
     p.add_argument("--time-limit", type=int, metavar="MS", help="time limit in milliseconds")
     p.add_argument("--memory-limit", type=int, metavar="MB", help="memory limit in megabytes")
     p.add_argument("--interactive", action=argparse.BooleanOptionalAction, default=None)
     p = _leaf(g, "check", problem_check,
-              "Local readiness heuristics: print errors (must fix) and warnings before building a package. "
-              "Exit 1 when `errors` is non-empty (`ready` is false); warnings alone keep exit 0")
+              "Local readiness heuristics: print errors (must fix: they block a package build or a usable "
+              "problem), warnings (worth a look) and info before building a package. Exit 0 when ready "
+              "(warnings alone keep 0). Exit 1 when not ready: the result, with `ready` false, is still "
+              "printed on stdout. Exit 1 with empty stdout means the check did not run (error on stderr). "
+              "So with --json: JSON with `ready` on stdout = it ran; empty stdout = it did not")
     _testset(p)
     _leaf(g, "cautions", problem_cautions,
           "Polygon's own cautions and package-readiness issues for the working copy")
     p = _leaf(g, "commit", problem_commit,
-              "Commit working-copy changes (needed before building); e-mails watchers unless --minor")
+              "Commit working-copy changes (needed before building). Without --minor Polygon e-mails the "
+              "problem's watchers, so it needs --yes; --minor sends no e-mails and needs no --yes")
     p.add_argument("-m", "--message", help="commit message")
     p.add_argument("--minor", action="store_true", help="mark as minor changes (no e-mail notification)")
+    _yes(p, "commit and e-mail the watchers", "required without --minor")
+    p.set_defaults(yes_rule=lambda a: not a.minor)
     _leaf(g, "update-working-copy", problem_update_working_copy, "Update the working copy to the latest revision")
     p = _leaf(g, "discard-working-copy", problem_discard_working_copy,
               "Throw away all uncommitted working-copy changes (needs --yes)")
@@ -745,7 +810,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lang", default="english", help="statement language (default: english)")
     p.add_argument("--encoding", default="UTF-8", help="statement encoding (default: UTF-8)")
     _text(p, "name", help="problem title in this language (no trailing newline: Polygon rejects it)")
-    for section in ("legend", "input", "output", "scoring", "interaction", "notes", "tutorial"):
+    _text(p, "legend", help="legend section (LaTeX)")
+    _text(p, "input-format", help="input format section (LaTeX)")
+    _text(p, "output-format", help="output format section (LaTeX)")
+    for section in ("scoring", "interaction", "notes", "tutorial"):
         _text(p, section, help=f"{section} section (LaTeX)")
     _leaf(g, "resources", statement_resources, "List statement resource files (images etc.)")
     p = _leaf(g, "view-resource", statement_view_resource, "Download a statement resource", output=True)
@@ -815,7 +883,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = _leaf(g, "save-test", checker_save_test, "Add or replace a checker test")
     p.add_argument("index", type=int, help="test index (1-based)")
     _text(p, "input", required=True)
-    _text(p, "output", required=True, dest="output_text", help="contestant output")
+    _text(p, "contestant-output", required=True, help="contestant output")
     _text(p, "answer", required=True, help="jury answer")
     p.add_argument("--verdict", choices=("OK", "WRONG_ANSWER", "PRESENTATION_ERROR", "CRASHED"),
                    required=True)
@@ -864,7 +932,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = _leaf(g, "preview", test_preview,
               "Preview tests (input/answer); missing previews start generating, so repeat later")
     _testset(p)
-    p = _leaf(g, "save-script", test_save_script,
+    p = _leaf(g, "upload-script", test_upload_script,
               "Replace the generation script and the tests it generates; each line is "
               "'<generator> <args> > <index>' or '... > $'")
     p.add_argument("path", metavar="PATH", help="local script file, or - for stdin")
@@ -890,7 +958,7 @@ def build_parser() -> argparse.ArgumentParser:
     deps = p.add_mutually_exclusive_group()
     deps.add_argument("--dependency", action="append", metavar="GROUP",
                       help="a group this group depends on; repeat for several (replaces the list)")
-    deps.add_argument("--no-dependencies", action="store_true", help="remove all dependencies")
+    deps.add_argument("--clear-dependencies", action="store_true", help="remove all dependencies")
     p = _leaf(g, "assign-group", test_set_group, "Put tests into a group (creates the group if new)")
     p.add_argument("group")
     p.add_argument("indices", nargs="+", type=int, metavar="INDEX")
@@ -942,30 +1010,37 @@ def build_parser() -> argparse.ArgumentParser:
 
     # polyman directories
     p = _leaf(root, "push", push_dir,
-              "One-way push of a polyman problem directory (Config.json) to Polygon: reads Polygon, writes "
-              "only the differences to the working copy (never commits). Creates the problem on the first run. "
-              "Exit 1 if any step failed, also with --dry-run",
+              "One-way push of a polyman problem directory (Config.json) to Polygon. It makes Polygon's "
+              "working copy match Config.json: remote edits are overwritten, the test script may be cleared "
+              "and re-saved (generated tests regenerate), and groups/points are switched as configured. It "
+              "reads Polygon first and writes only the differences; it never commits. Creates the problem "
+              "on the first run. Exit 1 if any step failed, also with --dry-run; exit 2 for a missing "
+              "directory or a missing/invalid Config.json",
               problem=False)
     p.add_argument("dir", metavar="DIR", help="polyman problem directory containing Config.json")
     p.add_argument("--pin", help="problem PIN, if the problem has one")
     p.add_argument("-n", "--dry-run", action="store_true",
                    help="read Polygon and print the planned writes without changing anything; it cannot "
                         "predict writes that Polygon itself would reject")
-    p.add_argument("--only", type=sections, metavar="SECTION[,SECTION...]",
-                   help="push only these sections: " + ", ".join(polyman_sync.SECTIONS))
+    p.add_argument("--only", type=sections, action="extend", metavar="SECTION[,SECTION...]",
+                   help="push only these sections (comma-separated or repeated): "
+                        + ", ".join(polyman_sync.SECTIONS))
     p.add_argument("--delete-extra-tests", action="store_true",
                    help="delete remote manual tests that the testset's manualTests list lacks (only when "
-                        "Config.json has a manualTests key). Files, solutions and statements are never "
-                        "deleted; extra ones are reported as warnings")
+                        "Config.json has a manualTests key); needs --yes unless -n. Files, solutions and "
+                        "statements are never deleted; extra ones are reported as warnings")
+    _yes(p, "delete the extra remote manual tests", "required with --delete-extra-tests, unless -n")
+    p.set_defaults(yes_rule=lambda a: a.delete_extra_tests and not a.dry_run)
 
     p = _leaf(root, "pull", pull_dir, "Write a polyman problem directory for an existing problem "
-                                      "(reads Polygon only)")
+                                      "(reads Polygon only). Exit 2 if DIR exists and is not empty")
     p.add_argument("dir", metavar="DIR", help="new or empty directory")
 
     # raw
     p = _leaf(root, "call", raw_call,
-              "Call any API method directly, e.g. `call problem.info problemId=123`", problem=False,
-              output=True)
+              "Call any API method directly, e.g. `call problem.info problemId=123`. With -o FILE the "
+              "result goes to FILE: bytes as is, anything else as printed (JSON with --json)",
+              problem=False, output=True)
     p.add_argument("method", help="API method name, e.g. problem.viewTags")
     p.add_argument("params", nargs="*", type=param, metavar="KEY=VALUE", help="parameters, sent literally")
     p.add_argument("--file", action="append", type=file_param, metavar="KEY=PATH",
@@ -977,11 +1052,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    global _stdin_used
+    global _stdin_used, _json_errors
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
     _stdin_used = False
+    words = list(sys.argv[1:] if argv is None else argv)
+    _json_errors = "--json" in (words[:words.index("--")] if "--" in words else words)
     args = build_parser().parse_args(argv)
     if getattr(args, "text_file", None) is not None:  # positional TEXT given as --file PATH
         args.text = args.text_file

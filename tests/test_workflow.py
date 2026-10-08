@@ -54,7 +54,7 @@ class CheckProblemTest(unittest.TestCase):
     def test_ready_problem(self):
         api = problem()
         report = check_problem(api, 7, pin="p")
-        self.assertEqual(report, {"problem_id": 7, "ready": True, "errors": [], "warnings": []})
+        self.assertEqual(report, {"problem_id": 7, "ready": True, "errors": [], "warnings": [], "info": []})
         self.assertTrue(all(params["problemId"] == 7 and params["pin"] == "p" for _, params in api.calls))
         # interactor is only queried for interactive problems (Polygon errors otherwise)
         self.assertNotIn("problem.interactor", [method for method, _ in api.calls])
@@ -65,8 +65,18 @@ class CheckProblemTest(unittest.TestCase):
         self.assertEqual((report["errors"], report["warnings"]), ([], []))
 
     def test_std_none_means_no_checker(self):
+        # Seen on real Polygon: buildPackage refuses with "Checker is not set", so it is an error.
         report = check_problem(problem(**{"problem.checker": "std::none"}), 7)
-        self.assertEqual(report["warnings"], ["checker is not set"])
+        self.assertFalse(report["ready"])
+        self.assertEqual((report["errors"], report["warnings"]), (["checker is not set"], []))
+
+    def test_main_solution_count_is_an_error(self):
+        # Seen on real Polygon: buildPackage refuses with "Expected to find exactly one main (model) solution".
+        report = check_problem(problem(**{"problem.solutions": [{"name": "a.cpp", "tag": "OK"},
+                                                                {"name": "b.cpp", "tag": "WA"},
+                                                                {"name": "c.cpp", "tag": "TL"}]}), 7)
+        self.assertFalse(report["ready"])
+        self.assertEqual(report["errors"], ["expected exactly one main (MA) solution, found 0"])
 
     def test_blocking_issues(self):
         report = check_problem(problem(**{
@@ -83,6 +93,7 @@ class CheckProblemTest(unittest.TestCase):
             "checker gone.cpp is not among source files",
             "testset tests has no tests",
             "no accepted solution",
+            "expected exactly one main (MA) solution, found 0",
         ])
 
     def test_interactive_problem_needs_interactor_and_protocol(self):
@@ -102,7 +113,7 @@ class CheckProblemTest(unittest.TestCase):
                 {"index": 1, "manual": True, "useInStatements": False, "points": 5},
                 {"index": 2, "manual": False, "useInStatements": False, "scriptLine": "gen 9 > 2"},
             ],
-            "problem.solutions": [{"name": "a.cpp", "tag": "OK"}, {"name": "b.cpp", "tag": "WA"}],
+            "problem.solutions": [{"name": "a.cpp", "tag": "MA"}, {"name": "b.cpp", "tag": "WA"}],
             "problem.checkerTests": [],
             "problem.packages": [{"id": 1, "state": "FAILED"}],
         }), 7)
@@ -112,11 +123,10 @@ class CheckProblemTest(unittest.TestCase):
             "testset tests has no statement samples",
             "tests have points but statements lack scoring: russian",
             "generated tests not matching the current script: [2]",
-            "expected exactly one main (MA) solution, found 0",
             "only one kind of wrong solution; cover at least two verdicts",
             "no checker tests",
-            "no READY package yet",
         ])
+        self.assertEqual(report["info"], ["no READY package yet"])
 
     def test_test_groups(self):
         tests = [{"index": 1, "manual": True, "useInStatements": True, "group": "g0"},
