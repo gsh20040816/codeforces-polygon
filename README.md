@@ -34,7 +34,7 @@ uvx --from git+https://github.com/gsh20040816/cf-polygon-mcp cf-polygon --help
 cf-polygon problem     list | create | info | update-info | check | cautions | commit
                        | update-working-copy | discard-working-copy | tags | set-tags
                        | description | set-description | tutorial | set-tutorial
-cf-polygon statement   list | save | resources | upload-resource
+cf-polygon statement   list | save | resources | view-resource | upload-resource
 cf-polygon file        list | view | upload
 cf-polygon solution    list | view | upload | extra-tag
 cf-polygon validator   show | set | extra | tests | save-test

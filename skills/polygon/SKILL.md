@@ -45,8 +45,13 @@ cf-polygon test save --help
   Bind it with `validator set`, `checker set` or `interactor set`.
 - Generated tests come from the script: each line is `<generator> <args> > <index>` or `... > $`
   (next free index), where `<generator>` is the uploaded source name without extension.
-- `test input`/`test answer` generate on demand; if a generator or validator crashes, the command
+- `test input`/`test answer` need a main (`MA`) solution to exist, even for manual tests.
+  They generate on demand; if a generator or validator crashes, the command
   exits 1 and the error text contains Polygon's message (often with the offending input).
+- Polygon normalizes line endings: statements and test inputs come back with CRLF, source files
+  with LF. Compare text modulo line endings; binary resources round-trip byte for byte.
+- Tags must be 2–32 characters; `problem set-tags ID` with no tags clears them.
+  `file upload ... --type resource --for-types ''` removes a resource's advanced properties.
 - Solution tags: `MA` main (exactly one), `OK` correct, `WA`/`TL`/`ML`/`RE`/`PE` expected failures,
   `TO` TL-or-OK, `RJ` any rejection.
 
@@ -102,6 +107,7 @@ or `std::ncmp.cpp`; anything else must be uploaded with `file upload` first.
 cf-polygon statement list 123456 --lang english --json > statement.json   # read current text
 cf-polygon statement save 123456 --lang english --legend @legend.tex
 cf-polygon statement upload-resource 123456 picture.png                 # for \includegraphics{picture.png}
+cf-polygon statement view-resource 123456 picture.png -o picture.png
 ```
 
 ### Tests, points and groups
@@ -113,9 +119,10 @@ cf-polygon test input 123456 7 -o 07.in          # generated tests too
 cf-polygon test answer 123456 7 -o 07.ans
 cf-polygon test enable-points 123456
 cf-polygon test enable-groups 123456
+cf-polygon test set-group 123456 subtask1 1 2 3      # a group exists once a test is in it
+cf-polygon test set-group 123456 subtask2 4 5
 cf-polygon test save-group 123456 subtask1 --points-policy COMPLETE_GROUP --feedback-policy ICPC
 cf-polygon test save-group 123456 subtask2 --points-policy COMPLETE_GROUP --dependencies subtask1
-cf-polygon test set-group 123456 subtask1 1 2 3
 cf-polygon test save 123456 1 --points 20
 cf-polygon solution extra-tag 123456 slow.cpp --group subtask2 --tag TL
 ```

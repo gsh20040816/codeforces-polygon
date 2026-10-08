@@ -33,15 +33,17 @@ SOLUTION_TAGS = ("MA", "OK", "RJ", "TL", "TO", "WA", "PE", "ML", "RE")
 # --------------------------------------------------------------------------- helpers
 
 def text(value: str) -> str:
-    """argparse type: literal text, ``@path`` file contents, or ``@-`` stdin."""
+    """argparse type: literal text, ``@path`` file contents, or ``@-`` stdin.
+
+    Files are decoded as UTF-8 without newline translation, so CRLF is sent as is.
+    """
     if not value.startswith("@"):
         return value
-    if value == "@-":
-        return sys.stdin.read()
     try:
-        return Path(value[1:]).expanduser().read_text(encoding="utf-8")
-    except OSError as exc:
-        raise argparse.ArgumentTypeError(str(exc)) from None
+        data = sys.stdin.buffer.read() if value == "@-" else Path(value[1:]).expanduser().read_bytes()
+        return data.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise argparse.ArgumentTypeError(f"{value}: {exc}") from None
 
 
 def read_upload(path: str) -> bytes:
@@ -169,7 +171,8 @@ def problem_tags(a):
 
 
 def problem_set_tags(a):
-    return pq(a, "problem.saveTags", tags=",".join(a.tags))
+    # Polygon rejects an empty value ("Field should not be empty"); a lone comma clears all tags.
+    return pq(a, "problem.saveTags", tags=",".join(a.tags) or ",")
 
 
 def problem_description(a):
@@ -207,6 +210,10 @@ def statement_save(a):
 
 def statement_resources(a):
     return pq(a, "problem.statementResources")
+
+
+def statement_view_resource(a):
+    return pq(a, "problem.viewStatementResource", raw=True, name=a.name)
 
 
 def statement_upload_resource(a):
@@ -473,7 +480,7 @@ def build_parser() -> argparse.ArgumentParser:
     _leaf(g, "discard-working-copy", problem_discard_working_copy, "Discard uncommitted working-copy changes")
     _leaf(g, "tags", problem_tags, "Show problem tags")
     p = _leaf(g, "set-tags", problem_set_tags, "Replace problem tags")
-    p.add_argument("tags", nargs="*", help="new tag list (empty clears all tags)")
+    p.add_argument("tags", nargs="*", help="new tag list, each 2-32 characters (no tags clears them)")
     _leaf(g, "description", problem_description, "Show the general description")
     p = _leaf(g, "set-description", problem_set_description, "Replace the general description")
     p.add_argument("text", type=text, metavar="TEXT")
@@ -492,6 +499,8 @@ def build_parser() -> argparse.ArgumentParser:
     for section in ("legend", "input", "output", "scoring", "interaction", "notes", "tutorial"):
         p.add_argument(f"--{section}", type=text, metavar="TEXT", help=f"{section} section (LaTeX)")
     _leaf(g, "resources", statement_resources, "List statement resource files (images etc.)")
+    p = _leaf(g, "view-resource", statement_view_resource, "Download a statement resource", output=True)
+    p.add_argument("name", help="resource file name")
     p = _leaf(g, "upload-resource", statement_upload_resource, "Upload a statement resource (binary ok)")
     _upload(p, "file")
 
@@ -506,7 +515,8 @@ def build_parser() -> argparse.ArgumentParser:
     _upload(p, "file")
     p.add_argument("--type", choices=FILE_TYPES, default="source", help="file type (default: source)")
     p.add_argument("--source-type", help="compiler for source files, e.g. cpp.g++17 (default: by extension)")
-    p.add_argument("--for-types", help="resource files only: forTypes, e.g. 'cpp.*'; empty string removes")
+    p.add_argument("--for-types", help="resource files only: forTypes, e.g. 'cpp.*'; '' removes "
+                                       "the resource's advanced properties")
     p.add_argument("--stages", nargs="+", choices=("COMPILE", "RUN"), help="resource files only")
     p.add_argument("--assets", nargs="+", choices=("VALIDATOR", "INTERACTOR", "CHECKER", "SOLUTION"),
                    help="resource files only")
@@ -575,7 +585,8 @@ def build_parser() -> argparse.ArgumentParser:
     _testset(p)
     p.add_argument("--with-inputs", action="store_true", help="include manual test inputs")
     for name, handler, what in (("input", test_input, "input"), ("answer", test_answer, "answer")):
-        p = _leaf(g, name, handler, f"Print a test's {what} (generated on demand)", output=True)
+        p = _leaf(g, name, handler, f"Print a test's {what} (generated on demand; "
+                                    "Polygon needs a main (MA) solution even for manual tests)", output=True)
         p.add_argument("index", type=int, help="test index (1-based)")
         _testset(p)
     p = _leaf(g, "save", test_save, "Add or update a manual test, or change test properties")
@@ -608,13 +619,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = _leaf(g, "groups", test_groups, "List test groups")
     _testset(p)
     p.add_argument("--group", help="only this group")
-    p = _leaf(g, "save-group", test_save_group, "Create or update a test group")
+    p = _leaf(g, "save-group", test_save_group,
+              "Set a test group's policies/dependencies. The group must already exist: it is created by "
+              "assigning a test to it (test save --group / test set-group), after enable-groups")
     p.add_argument("group")
     _testset(p)
     p.add_argument("--points-policy", choices=("COMPLETE_GROUP", "EACH_TEST"))
     p.add_argument("--feedback-policy", choices=("NONE", "POINTS", "ICPC", "COMPLETE"))
     p.add_argument("--dependencies", nargs="*", metavar="GROUP", help="groups this group depends on")
-    p = _leaf(g, "set-group", test_set_group, "Put tests into a group")
+    p = _leaf(g, "set-group", test_set_group, "Put tests into a group (creates the group if new)")
     p.add_argument("group")
     p.add_argument("indices", nargs="+", type=int, metavar="INDEX")
     _testset(p)

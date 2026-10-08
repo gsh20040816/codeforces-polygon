@@ -30,6 +30,15 @@
 - `problem cautions`：查看 Polygon 自带的 cautions 和 package 就绪问题（`problem.cautions`）。
 - `call`：直接调用任意 Polygon API 方法（`KEY=@path` 会上传文件内容）。
 - `test delete` 支持一次删除多个测试（`testIndices`）。
+- `statement view-resource`：下载题面资源文件（`problem.viewStatementResource`）。
+
+### Fixed（真实 Polygon 冒烟测试中发现）
+
+- `problem set-tags` 不带参数时改为发送 `,`：Polygon 不接受空值，`,` 才能清空标签。
+- `problem check` 不再把 `std::wcmp.cpp` 这类标准 checker 当成缺失的源文件，也不再为它们提示缺少 checker 测试。
+- `problem check` 把 Polygon 在未设置 checker 时返回的 `std::none` 当作「未设置」。
+- `@file` / `@-` 读取文本时不再做换行转换，CRLF 原样发送。
+- 修正 `test save-group` 的说明：测试组需要先通过分配测试创建，`save-group` 只修改已有组的策略和依赖。
 
 ### Removed
 

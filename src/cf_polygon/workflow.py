@@ -108,6 +108,8 @@ def check_problem(api: Polygon, problem_id: int, pin: str | None = None, testset
 
     validator = q("problem.validator")
     checker = q("problem.checker")
+    if checker == "std::none":  # what Polygon reports when no checker is selected
+        checker = ""
     interactor = q("problem.interactor") if interactive else ""
     extra_validators = q("problem.extraValidators") or []
     if not validator:
@@ -119,7 +121,8 @@ def check_problem(api: Polygon, problem_id: int, pin: str | None = None, testset
     for role, name in [("validator", validator), ("checker", checker), ("interactor", interactor)] + [
         ("extra validator", name) for name in extra_validators
     ]:
-        if name and name not in sources:
+        # Standard checkers such as std::wcmp.cpp are built into Polygon, not source files.
+        if name and not name.startswith("std::") and name not in sources:
             errors.append(f"{role} {name} is not among source files")
 
     statement_resources = {f["name"] for f in q("problem.statementResources") or []}
@@ -179,7 +182,7 @@ def check_problem(api: Polygon, problem_id: int, pin: str | None = None, testset
 
     if validator and not q("problem.validatorTests"):
         warnings.append("no validator tests")
-    if checker and not q("problem.checkerTests"):
+    if checker and not checker.startswith("std::") and not q("problem.checkerTests"):
         warnings.append("no checker tests")
     if not any(p.get("state") == "READY" for p in q("problem.packages") or []):
         warnings.append("no READY package yet")

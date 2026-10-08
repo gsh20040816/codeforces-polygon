@@ -136,6 +136,30 @@ class CommandMappingTest(unittest.TestCase):
     def test_set_tags(self):
         self.assertEqual(Run(["problem", "set-tags", "9", "dp", "greedy"]).call[1]["tags"], "dp,greedy")
 
+    def test_set_tags_without_tags_clears_with_comma(self):
+        # Polygon rejects tags="" ("Field should not be empty"); "," clears (verified on real Polygon).
+        self.assertEqual(Run(["problem", "set-tags", "9"]).call[1]["tags"], ",")
+
+    def test_text_file_keeps_crlf_verbatim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "legend.tex").write_bytes("Даны $n$\r\nчисел &=?#\n".encode())
+            r = Run(["statement", "save", "9", "--legend", f"@{tmp}/legend.tex"])
+        self.assertEqual(r.call[1]["legend"], "Даны $n$\r\nчисел &=?#\n")
+
+    def test_text_file_must_be_utf8(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "bad.tex").write_bytes(b"\xff\xfe")
+            with redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as ctx:
+                cli.main(["statement", "save", "9", "--legend", f"@{tmp}/bad.tex"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("bad.tex", err.getvalue())
+
+    def test_statement_view_resource(self):
+        r = Run(["statement", "view-resource", "9", "pic.png"], result=b"\x89PNG")
+        self.assertEqual(r.stdout, b"\x89PNG")
+        self.assertEqual(r.call, ("problem.viewStatementResource",
+                                  {"problemId": 9, "pin": None, "raw": True, "name": "pic.png"}))
+
     def test_statement_save_reads_sections_from_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "legend.tex").write_text("Given $n$ numbers.", encoding="utf-8")

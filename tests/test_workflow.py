@@ -57,6 +57,15 @@ class CheckProblemTest(unittest.TestCase):
         # interactor is only queried for interactive problems (Polygon errors otherwise)
         self.assertNotIn("problem.interactor", [method for method, _ in api.calls])
 
+    def test_standard_checker_is_not_a_missing_source(self):
+        # Seen on real Polygon: `checker set std::wcmp.cpp` works but it is not in problem.files.
+        report = check_problem(problem(**{"problem.checker": "std::wcmp.cpp", "problem.checkerTests": []}), 7)
+        self.assertEqual((report["errors"], report["warnings"]), ([], []))
+
+    def test_std_none_means_no_checker(self):
+        report = check_problem(problem(**{"problem.checker": "std::none"}), 7)
+        self.assertEqual(report["warnings"], ["checker is not set"])
+
     def test_blocking_issues(self):
         report = check_problem(problem(**{
             "problem.statements": {"english": {"name": "Sum", "legend": "", "input": "n", "output": "s"}},
