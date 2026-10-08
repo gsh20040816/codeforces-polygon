@@ -103,7 +103,7 @@ jobs:
       id-token: write
     environment:
       name: pypi
-      url: https://pypi.org/p/cf-polygon-mcp
+      url: https://pypi.org/p/codeforces-polygon
     steps:
       - name: Retrieve release distributions
         uses: actions/download-artifact@v5
