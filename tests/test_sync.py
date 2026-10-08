@@ -548,7 +548,7 @@ class CommandTest(SyncTestCase):
         nameless = Path(self.tmp.name, "nameless")
         nameless.mkdir()
         (nameless / "Config.json").write_text("{}", encoding="utf-8")
-        for path, message in ((self.tmp.name + "/nope", "no such directory"), (empty, "Config.json not found"),
+        for path, message in ((self.tmp.name + "/nope", "Config.json not found"), (empty, "Config.json not found"),
                               (bad, "invalid JSON"), (nameless, "neither problemId nor name")):
             for extra in ([], ["-n"]):
                 with self.subTest(path=str(path), extra=extra):

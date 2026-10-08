@@ -84,6 +84,24 @@ class HelpTest(unittest.TestCase):
         self.assertEqual(r.code, 2)
         self.assertIn("usage: polygonctl", r.stderr)
 
+    def test_option_prefixes_are_not_accepted(self):
+        def every_parser(p):
+            yield p
+            for action in p._actions:
+                if isinstance(action, argparse._SubParsersAction):
+                    for child in action.choices.values():
+                        yield from every_parser(child)
+
+        self.assertTrue(all(p.allow_abbrev is False for p in every_parser(cli.build_parser())))
+        for argv in (["push", "dir", "--delete", "-n"], ["problem", "commit", "9", "--min"],
+                     ["problem", "update-info", "9", "--input", "stdin"],
+                     ["test", "set-group-policy", "9", "g", "--clear"], ["problem", "info", "9", "--js"]):
+            with self.subTest(argv=argv):
+                r = Run(argv)
+                self.assertEqual((r.code, r.calls), (2, []))
+                self.assertIn("unrecognized arguments", r.stderr)
+        self.assertEqual(Run(["problem", "commit", "9", "--minor"]).code, 0)  # full names still work
+
     def test_version(self):
         r = Run(["--version"])
         self.assertEqual(r.code, 0)

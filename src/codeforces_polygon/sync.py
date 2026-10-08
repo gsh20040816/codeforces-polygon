@@ -607,11 +607,6 @@ def _remote_input(test: dict) -> str:
     return test.get("input") or ""
 
 
-def sync(api: Polygon, directory: str, **options: Any) -> dict:
-    problem = Problem.load(directory)
-    return Sync(api, problem, **options).run()
-
-
 # --------------------------------------------------------------------------- pull
 
 _POLYGON_DEFAULT_FILES = {"testlib.h", "olymp.sty", "problem.tex", "statements.ftl"}  # every problem has them
@@ -627,8 +622,10 @@ def pull(api: Polygon, problem_id: int, directory: str, pin: str | None = None) 
     headers) are listed in ``warnings``.
     """
     root = Path(directory)
+    if root.exists() and not root.is_dir():
+        raise ConfigError(f"{root} is not a directory")
     if root.exists() and any(root.iterdir()):
-        raise ConfigError(f"{root} is not empty")
+        raise ConfigError(f"{root} is not empty; pull writes only into a new or empty directory")
 
     def q(method: str, **params: Any) -> Any:
         return api.call(method, problemId=problem_id, pin=pin, **params)

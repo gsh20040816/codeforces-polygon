@@ -92,9 +92,12 @@ class CheckProblemTest(unittest.TestCase):
             "validator is not set",
             "checker gone.cpp is not among source files",
             "testset tests has no tests",
-            "no accepted solution",
             "expected exactly one main (MA) solution, found 0",
         ])
+
+    def test_no_solutions_is_one_error(self):
+        report = check_problem(problem(**{"problem.solutions": []}), 7)
+        self.assertEqual(report["errors"], ["expected exactly one main (MA) solution, found 0"])
 
     def test_interactive_problem_needs_interactor_and_protocol(self):
         info = dict(READY_PROBLEM["problem.info"], interactive=True)

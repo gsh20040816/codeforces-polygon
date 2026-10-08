@@ -25,6 +25,7 @@ polygonctl test save --help
 ## Conventions
 
 - Usual POSIX/GNU syntax: options in any order, `--` ends options, `-h`/`--help` everywhere.
+  Spell options out in full: prefixes such as `--min` for `--minor` are rejected (exit 2).
 - Add `--json` to get machine-readable output; without it lists print as TSV, objects as `key: value`.
   Write commands print `{"ok": true}` with `--json` when Polygon returns nothing.
 - stdout carries only the result; errors go to stderr (`{"error": ...}` with `--json`).
@@ -171,25 +172,6 @@ Pitfalls:
 - The polyman template lists a `russian` statement whose files do not exist; remove that entry
   (or add the files) or `push` fails that step.
 
-### Inspect a problem
-
-```bash
-polygonctl problem list --name sum --json        # find the id
-polygonctl problem info 123456 --json            # limits, io files, interactive
-polygonctl statement list 123456 --lang english --json
-polygonctl file list 123456 --json
-polygonctl solution list 123456 --json
-polygonctl test list 123456 --json
-polygonctl test script 123456
-polygonctl validator show 123456
-polygonctl checker show 123456
-polygonctl file view 123456 gen.cpp -o gen.cpp
-polygonctl problem check 123456 --json           # exit 1 if not ready ("errors" non-empty); warnings alone keep 0.
-                                                 # With --json: JSON with `ready` on stdout = it ran; empty stdout = it did not
-polygonctl problem cautions 123456 --json        # Polygon's own cautions / package-readiness issues
-polygonctl issue list 123456 --open --json       # reviewers' open issues
-```
-
 ### Create a problem by hand
 
 ```bash
@@ -212,6 +194,25 @@ polygonctl problem commit 123456 -m "initial version" --yes
 polygonctl package build 123456 --wait --json    # READY → exit 0, FAILED → exit 1 with the reason
 ```
 
+### Inspect a problem
+
+```bash
+polygonctl problem list --name sum --json        # find the id
+polygonctl problem info 123456 --json            # limits, io files, interactive
+polygonctl statement list 123456 --lang english --json
+polygonctl file list 123456 --json
+polygonctl solution list 123456 --json
+polygonctl test list 123456 --json
+polygonctl test script 123456
+polygonctl validator show 123456
+polygonctl checker show 123456
+polygonctl file view 123456 gen.cpp -o gen.cpp
+polygonctl problem check 123456 --json           # exit 1 if not ready ("errors" non-empty); warnings alone keep 0.
+                                                 # With --json: JSON with `ready` on stdout = it ran; empty stdout = it did not
+polygonctl problem cautions 123456 --json        # Polygon's own cautions / package-readiness issues
+polygonctl issue list 123456 --open --json       # reviewers' open issues
+```
+
 ### Update a statement
 
 `statement save` only changes the sections you pass; others stay as they are.
@@ -226,25 +227,34 @@ polygonctl statement render 123456 --save-dir render     # HTML + PDF; can take 
 
 ### Tests, points and groups
 
+Continuing the problem created above (manual test 1, a script that generates tests 2–7):
+
 ```bash
-polygonctl test save 123456 5 --input-file tests/05.txt --description "max n"
-polygonctl test delete 123456 5 6 --yes         # manual tests, all or none
+polygonctl test list 123456 --json               # which indices exist, manual or generated
+polygonctl test save 123456 8 --input-file tests/08.txt --description "max n"   # a free index
+polygonctl test save 123456 9 --input-file tests/09.txt
+polygonctl test delete 123456 9 --yes            # manual tests; several indices: all or none
 polygonctl test input 123456 7 -o 07.in          # generated tests too
 polygonctl test answer 123456 7 -o 07.ans
 polygonctl test preview 123456 --json            # previews; repeat if inputs are still missing
-polygonctl test clear-script 123456 --yes        # removes the script and all generated tests
 polygonctl test enable-points 123456             # disable-points turns them off
 polygonctl test enable-checker-percent 123456    # checker points are percents (needs points)
 polygonctl test enable-groups 123456             # disable-groups turns them off
 polygonctl test assign-group 123456 subtask1 1 2 3   # a group exists once a test is in it
-polygonctl test assign-group 123456 subtask2 4 5
+polygonctl test assign-group 123456 subtask2 4 5 6 7 8
 polygonctl test set-group-policy 123456 subtask1 --points-policy COMPLETE_GROUP --feedback-policy ICPC
 polygonctl test set-group-policy 123456 subtask2 --points-policy COMPLETE_GROUP --dependency subtask1
 polygonctl test save 123456 1 --points 20
-polygonctl solution extra-tag 123456 slow.cpp --group subtask2 --tag TL
+polygonctl solution extra-tag 123456 brute.cpp --group subtask2 --tag TL
 ```
 
 For scored problems also fill the statement's `--scoring` section.
+
+To start the generated tests over (manual tests stay):
+
+```bash
+polygonctl test clear-script 123456 --yes        # removes the script and all generated tests
+```
 
 ### Interactive problems
 

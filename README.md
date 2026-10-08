@@ -58,7 +58,7 @@ polygonctl call        <method> [KEY=VALUE ...] [--file KEY=PATH ...]   # 直接
 
 约定：
 
-- 参数：常见的 POSIX/GNU 写法，选项顺序随意，`--` 之后都当位置参数，`-h`/`--help` 到处可用，`polygonctl --version` 显示版本。
+- 参数：常见的 POSIX/GNU 写法，选项顺序随意，`--` 之后都当位置参数，`-h`/`--help` 到处可用，`polygonctl --version` 显示版本。选项必须写全名，不接受前缀缩写（比如 `--min` 代替 `--minor` 会报用法错误）。
 - 输出：结果写 stdout，错误和诊断写 stderr。默认是文本，列表按 TSV 打印，对象按 `key: value` 打印。加 `--json` 输出完整 JSON（错误是 stderr 上的 `{"error": ...}`，参数解析错误也一样）；写操作如果 Polygon 没有返回内容，会打印 `{"ok": true}`。
 - 退出码：`0` 成功；`1` 命令失败（Polygon 或网络错误、`push` 有失败的步骤、`statement render` 有渲染失败、`problem check` 发现 errors；后三种情况结果仍会写到 stdout）；`2` 用法错误（未知选项、命令行里给的文件不存在或读不了、同一条命令里两次用 stdin、缺 `--yes`、`push` 的目录不存在或 `Config.json` 缺失/不是合法 JSON、`pull` 的目标目录非空等）。`push --dry-run` 和真跑的退出码含义相同。
 - 文本选项 `--X TEXT` 按字面发送（`@` 没有特殊含义）；对应的 `--X-file PATH` 从 UTF-8 文件读（按原样发送，不转换换行），`PATH` 写 `-` 表示读 stdin（每条命令只能用一次）。文本是位置参数的命令（`problem set-description`、`problem set-tutorial`、`note set`）用 `TEXT` 或 `--file PATH`。
@@ -117,7 +117,7 @@ polygonctl package build 123456 --wait --json
 
 `errors` 不为空时没准备好（`ready` 为 false），退出码为 1，完整结果仍写到 stdout，stderr 是 `problem check: not ready, N error(s)`，不应该打包；只有 `warnings` 时退出码仍是 0，建议看一遍。所以加 `--json` 时：stdout 上有带 `ready` 的 JSON = 检查跑完了（`ready` 说明是否就绪）；退出码 1 且 stdout 为空 = 检查没跑成（原因在 stderr）。
 
-- **errors**：缺少输入/输出文件设置；没有题面，或题面缺少 name/legend/input/output；交互题缺 interaction 或 interactor；没有设置 validator；没有设置 checker；设置的 validator/checker/interactor/extra validator 不在源文件列表里；题面引用了不存在的资源；测试集为空；测试用到了未定义的测试组；测试组依赖了不存在的组，或者依赖成环；没有正确解；主解（MA）不是正好一个。没有 checker 和 MA 数量不对这两条会让 Polygon 拒绝打包（实测）。
+- **errors**：缺少输入/输出文件设置；没有题面，或题面缺少 name/legend/input/output；交互题缺 interaction 或 interactor；没有设置 validator；没有设置 checker；设置的 validator/checker/interactor/extra validator 不在源文件列表里；题面引用了不存在的资源；测试集为空；测试用到了未定义的测试组；测试组依赖了不存在的组，或者依赖成环；主解（MA）不是正好一个（一个解都没有时也只报这一条）。没有 checker 和 MA 数量不对这两条会让 Polygon 拒绝打包（实测）。
 - **warnings**：没有英文题面；非交互题写了 interaction；没有样例；有计分但题面没写 scoring；生成测试和当前脚本对不上；错误解不够或者只有一种；没有 validator/checker 测试。
 - **info**：既不是错误也不是警告的提示，目前只有“还没有 READY 的 package”。
 

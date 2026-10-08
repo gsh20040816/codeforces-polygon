@@ -28,7 +28,7 @@ EPILOG = """\
 Credentials: POLYGON_API_KEY / POLYGON_API_SECRET for API commands,
 POLYGON_LOGIN / POLYGON_PASSWORD for the `download` group.
 A TEXT option --X has a --X-file PATH twin that reads the text from a UTF-8 file
-(PATH - reads stdin, once per command). Use -- to end options.
+(PATH - reads stdin, once per command). Use -- to end options; spell options in full (no prefixes).
 Commands that delete data, notify people or are otherwise hard to undo need -y/--yes:
 problem discard-working-copy, problem commit (unless --minor), test delete,
 test clear-script, material remove, issue add, issue update, access set, and
@@ -580,21 +580,8 @@ def sections(value: str) -> list[str]:
     return names
 
 
-def _problem_dir(path: str) -> Problem:
-    """Load DIR/Config.json; a missing directory or a bad Config.json is a usage error."""
-    if not Path(path).is_dir():
-        raise UsageError(f"{path}: no such directory")
-    try:
-        problem = Problem.load(path)
-    except ConfigError as exc:
-        raise UsageError(str(exc)) from None
-    if problem.config.get("problemId") is None and not problem.config.get("name"):
-        raise UsageError(f"{Path(path) / 'Config.json'} has neither problemId nor name")
-    return problem
-
-
 def push_dir(a):
-    problem = _problem_dir(a.dir)
+    problem = Problem.load(a.dir)  # a missing or invalid Config.json is a ConfigError: exit 2
     confirm(a, "this deletes remote manual tests that Config.json lacks")
     result = polyman_sync.Sync(api(), problem, dry_run=a.dry_run, prune=a.delete_extra_tests, only=a.only,
                                pin=a.pin).run()
@@ -606,11 +593,6 @@ def push_dir(a):
 
 
 def pull_dir(a):
-    root = Path(a.dir)
-    if root.exists() and not root.is_dir():
-        raise UsageError(f"{root} is not a directory")
-    if root.is_dir() and any(root.iterdir()):
-        raise UsageError(f"{root} is not empty; pull writes only into a new or empty directory")
     return polyman_sync.pull(api(), a.problem_id, a.dir, pin=a.pin)
 
 
@@ -626,7 +608,11 @@ _json_errors = False  # set by main when --json is on the command line
 
 
 class Parser(argparse.ArgumentParser):
-    """Usage errors as ``{"error": ...}`` on stderr when --json was given; exit 2 either way."""
+    """Exact option names only; usage errors as ``{"error": ...}`` on stderr with --json (exit 2 either way)."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("allow_abbrev", False)  # no hidden prefix aliases such as --min for --minor
+        super().__init__(*args, **kwargs)
 
     def error(self, message: str):
         if _json_errors:
@@ -1067,9 +1053,8 @@ def main(argv: list[str] | None = None) -> int:
     except Unfinished as exc:
         emit(exc.result, args)
         return _fail(args, str(exc), 1)
-    except ConfigError as exc:
-        return _fail(args, str(exc), 1)
-    except (argparse.ArgumentTypeError, UsageError) as exc:  # e.g. a missing upload file, no --yes
+    except (argparse.ArgumentTypeError, UsageError, ConfigError) as exc:
+        # e.g. a missing upload file, no --yes, a bad Config.json (push step errors are failed steps instead)
         return _fail(args, str(exc), 2)
     except (PolygonError, requests.RequestException, OSError) as exc:
         return _fail(args, str(exc), 1)

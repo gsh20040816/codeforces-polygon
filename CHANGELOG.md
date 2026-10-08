@@ -44,6 +44,8 @@
   | `problem check` 的 stderr 摘要 `problem check: N error(s)` | `problem check: not ready, N error(s)` |
   | `push` 目录不存在 / `Config.json` 缺失或不是合法 JSON：退出码 1 | 退出码 2 |
   | `pull` 目标目录非空：退出码 1 | 退出码 2 |
+  | 选项可以写前缀缩写（如 `push --delete`、`problem commit --min`、`update-info --input`） | 必须写全名，前缀报用法错误（退出码 2） |
+  | `problem check` 一个解都没有时报 "no accepted solution" 和 "found 0" 两条 | 只报 `expected exactly one main (MA) solution, found 0` 一条 |
 
 - 旧工具对应的新命令：
   - `get_problems` / `create_problem` / `get_problem_info` / `update_problem_info` → `problem list|create|info|update-info`

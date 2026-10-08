@@ -185,8 +185,7 @@ def check_problem(api: Polygon, problem_id: int, pin: str | None = None, testset
             warnings.append(f"groups without tests: {', '.join(empty)}")
 
     tags = Counter(s.get("tag") for s in q("problem.solutions") or [])
-    if not any(tags[tag] for tag in _ACCEPTED_TAGS):
-        errors.append("no accepted solution")
+    # An MA solution is an accepted one, so this one check also covers "no accepted solution".
     if tags["MA"] != 1:
         # Verified on Polygon: problem.buildPackage refuses with
         # "Expected to find exactly one main (model) solution".

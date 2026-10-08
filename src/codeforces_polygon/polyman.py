@@ -26,7 +26,11 @@ _GROUP_RE = re.compile(r"^@group\s+(\S+)\s*$")
 
 
 class ConfigError(ValueError):
-    """The polyman directory is inconsistent (bad script, missing file, duplicate index...)."""
+    """The polyman directory is inconsistent (bad script, missing file, duplicate index...).
+
+    Inside a ``push`` step it becomes a failed step; one that reaches the command line
+    (a missing or invalid Config.json, a non-empty ``pull`` directory) is a usage error.
+    """
 
 
 def lf(text: str) -> str:

@@ -42,6 +42,9 @@ class FakePolygon:
         self.policies = {}
         self.fail = {}  # method -> message, to inject errors
         self.script_shift = 0  # number generated tests differently from polyman (a hypothetical Polygon)
+        # state for the rest of the API, used when the docs' examples are run in order
+        self.resources, self.packages, self.issues = {}, [], []
+        self.note, self.materials, self.accesses, self.extra_tags = "", {}, {}, []
 
     @property
     def writes(self):
@@ -68,11 +71,70 @@ class FakePolygon:
         self.problem_id = 501
         return {"id": 501, "name": name}
 
-    def api_list(self, id=None):
+    def api_list(self, **filters):
         return [{"id": self.problem_id, "name": "smoke-test-unit", "owner": "me", "revision": 0}]
 
     def api_statementResources(self):
-        return []
+        return [{"name": n, "length": len(d)} for n, d in sorted(self.resources.items())]
+
+    def api_saveStatementResource(self, name, file):
+        self.resources[name] = file if isinstance(file, bytes) else file.encode()
+
+    def api_viewStatementResource(self, name):
+        return self.resources[name]
+
+    def api_renderStatements(self, includeContent=None):
+        return {"revision": 1, "tutorials": [], "statements": [
+            {"language": lang, "html": {"status": "OK"}, "pdf": {"status": "OK"}} for lang in self.statements]}
+
+    def api_cautions(self):
+        return {"common": [], "statement": [], "structure": [], "issues": [], "packageReadinessIssues": []}
+
+    def api_commitChanges(self, minorChanges=None, message=None):
+        return {"committed": True, "conflictOccurred": False, "message": "Your changes have been committed"}
+
+    def api_packages(self):
+        return [dict(p) for p in self.packages]
+
+    def api_buildPackage(self, full, verify):
+        self.packages.append({"id": len(self.packages) + 1, "revision": 1, "state": "READY", "comment": ""})
+
+    def api_package(self, packageId, type=None):
+        return b"PK\x03\x04"
+
+    def api_issues(self):
+        return [dict(i) for i in self.issues]
+
+    def api_addIssue(self, type, content, assignee=None):
+        self.issues.append({"id": len(self.issues) + 1, "type": type, "content": content, "status": "OPENED"})
+
+    def api_updateIssue(self, issueId, **changes):
+        pass
+
+    def api_note(self):
+        return self.note
+
+    def api_saveNote(self, note):
+        if len(note) > 50:
+            raise PolygonError("note: too long")
+        self.note = note
+
+    def api_materials(self):
+        return [dict(m, name=n) for n, m in self.materials.items()]
+
+    def api_setMaterial(self, name, remove=None, originalName=None, **material):
+        self.materials.pop(originalName or name, None)
+        if not remove:
+            self.materials[name] = material
+
+    def api_accesses(self):
+        return [{"login": l, "type": t} for l, t in self.accesses.items()]
+
+    def api_setAccess(self, login, accessType):
+        self.accesses[login] = accessType
+
+    def api_problems(self, contestId):  # contest.problems
+        return {"A": {"id": self.problem_id, "name": "smoke-test-unit"}}
 
     def api_info(self):
         return dict(self.info)
@@ -138,6 +200,9 @@ class FakePolygon:
     def api_setInteractor(self, interactor):
         self.roles["interactor"] = interactor
 
+    def api_extraValidators(self):
+        return []
+
     def api_validatorTests(self):
         return [dict(t, index=i) for i, t in sorted(self.validator_tests.items())]
 
@@ -156,6 +221,13 @@ class FakePolygon:
 
     def api_viewSolution(self, name):
         return self.solutions[name][0].encode()
+
+    def api_editSolutionExtraTags(self, name, remove, testset=None, testGroup=None, tag=None):
+        if name not in self.solutions:
+            raise PolygonError(f"name: solution {name} not found")
+        if testGroup is not None and testGroup not in {t.get("group") for t in self.tests.values()}:
+            raise PolygonError(f"testGroup: group {testGroup} not found")
+        self.extra_tags.append((name, testset, testGroup, tag, remove))
 
     def api_saveSolution(self, name, file, tag, sourceType="cpp.g++17"):
         if tag == "MA" and any(t == "MA" and n != name for n, (_, t, _) in self.solutions.items()):
@@ -177,6 +249,23 @@ class FakePolygon:
                 item["points"] = float(t.get("points", 0))
             out.append(item)
         return out
+
+    def _generated_or_manual(self, testIndex):
+        if testIndex not in self.tests:
+            raise PolygonError(f"testIndex: test {testIndex} not found")
+        if not any(tag == "MA" for _, tag, _ in self.solutions.values()):
+            raise PolygonError("problem has no main solution")
+        t = self.tests[testIndex]
+        return (t["input"] if t["manual"] else f"input of {t['line']}\n").encode()
+
+    def api_testInput(self, testset, testIndex):
+        return self._generated_or_manual(testIndex)
+
+    def api_testAnswer(self, testset, testIndex):
+        return b"answer to " + self._generated_or_manual(testIndex)
+
+    def api_previewTests(self, testset):
+        return [{"index": i} for i in sorted(self.tests)]
 
     def api_script(self, testset):
         return self.script.encode()
@@ -238,7 +327,11 @@ class FakePolygon:
             t["sample"] = testUseInStatements
 
     def api_deleteTest(self, testset, testIndices):
-        for index in map(int, testIndices.split(",")):
+        indices = list(map(int, testIndices.split(",")))
+        missing = [i for i in indices if i not in self.tests]
+        if missing:  # all or none, as on Polygon
+            raise PolygonError(f"testIndices: no tests {missing}")
+        for index in indices:
             del self.tests[index]
         if any(line.indices is None for line in self.script_lines):  # `$` tests follow the free indices
             groups = {t["seq"]: t.get("group") for t in self.tests.values() if not t["manual"]}
@@ -247,7 +340,11 @@ class FakePolygon:
         self._drop_empty_groups()
 
     def api_setTestGroup(self, testset, testGroup, testIndices):
-        for index in map(int, testIndices.split(",")):
+        indices = list(map(int, testIndices.split(",")))
+        missing = [i for i in indices if i not in self.tests]
+        if missing:
+            raise PolygonError(f"testIndices: no tests {missing}")
+        for index in indices:
             self.tests[index]["group"] = testGroup
 
     def api_enableGroups(self, testset, enable):
@@ -255,6 +352,10 @@ class FakePolygon:
 
     def api_enablePoints(self, enable):
         self.points_enabled = enable
+
+    def api_enableTreatPointsFromCheckerAsPercent(self, enable):
+        if enable and not self.points_enabled:
+            raise PolygonError("enable: points are disabled")
 
     def _drop_empty_groups(self):
         used = {t.get("group") for t in self.tests.values()}
