@@ -29,7 +29,7 @@ polygonctl test save --help
   Write commands print `{"ok": true}` with `--json` when Polygon returns nothing.
 - stdout carries only the result; errors go to stderr (`{"error": ...}` with `--json`).
 - Exit status: `0` success; `1` the command failed (Polygon or network error, a failed `push` step, a
-  failed render, a `problem check` that found errors — the result is still printed to stdout); `2` bad usage (unknown option, missing or unreadable file named on the command
+  failed render, a `problem check` that found errors; for the last three the result is still printed to stdout); `2` bad usage (unknown option, missing or unreadable file named on the command
   line, stdin used twice, missing `--yes`). Check the exit status, never parse prose.
 - A text option `--X TEXT` takes the text literally (an `@` is just a character). Its twin
   `--X-file PATH` reads a UTF-8 file sent byte for byte; `PATH` `-` reads stdin (once per command).

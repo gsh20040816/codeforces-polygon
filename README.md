@@ -60,7 +60,7 @@ polygonctl call        <method> [KEY=VALUE ...] [--file KEY=PATH ...]   # 直接
 
 - 参数：常见的 POSIX/GNU 写法，选项顺序随意，`--` 之后都当位置参数，`-h`/`--help` 到处可用。
 - 输出：结果写 stdout，错误和诊断写 stderr。默认是文本，列表按 TSV 打印，对象按 `key: value` 打印。加 `--json` 输出完整 JSON（错误是 stderr 上的 `{"error": ...}`）；写操作如果 Polygon 没有返回内容，会打印 `{"ok": true}`。
-- 退出码：`0` 成功；`1` 命令失败（Polygon 或网络错误、`push` 有失败的步骤、`statement render` 有渲染失败、`problem check` 发现 errors；这些情况下结果仍会写到 stdout）；`2` 用法错误（未知选项、命令行里给的文件不存在或读不了、同一条命令里两次用 stdin、缺 `--yes` 等）。`push --dry-run` 和真跑的退出码含义相同。
+- 退出码：`0` 成功；`1` 命令失败（Polygon 或网络错误、`push` 有失败的步骤、`statement render` 有渲染失败、`problem check` 发现 errors；后三种情况结果仍会写到 stdout）；`2` 用法错误（未知选项、命令行里给的文件不存在或读不了、同一条命令里两次用 stdin、缺 `--yes` 等）。`push --dry-run` 和真跑的退出码含义相同。
 - 文本选项 `--X TEXT` 按字面发送（`@` 没有特殊含义）；对应的 `--X-file PATH` 从 UTF-8 文件读（按原样发送，不转换换行），`PATH` 写 `-` 表示读 stdin（每条命令只能用一次）。文本是位置参数的命令（`problem set-description`、`problem set-tutorial`、`note set`）用 `TEXT` 或 `--file PATH`。
 - 上传命令接受本地路径；用 `-` 从 stdin 读时需要同时给 `--name`。二进制文件（比如题面图片）也能上传。
 - 删除东西或会通知别人的命令不加 `-y`/`--yes` 不执行（退出码 2）：`problem discard-working-copy`、`test delete`、`test clear-script`、`material remove`、`issue add`、`issue update`、`access set`。
