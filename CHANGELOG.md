@@ -4,7 +4,38 @@
 
 ## [Unreleased]
 
-- 暂无未发布变更。
+### Changed
+
+- **不兼容变更**：项目从 MCP 服务改为命令行工具 `cf-polygon`，附带 agent skill（`skills/polygon/SKILL.md`）。不再提供 MCP 接口，也不再依赖 `mcp` 和 `pydantic`。
+- 架构变成三层：`client.py`（签名 + 请求）、`cli.py`（命令定义）、`workflow.py`（自检和构建等待）。删除了 `polygon/api/*` 里每个 API 一个文件的封装、`ProblemSession`、MCP 统一返回结构，以及工具注册表和启动时的自检。
+- 所有 API 请求都改为签名后的 multipart POST，签名按字节计算，所以题面图片等二进制文件也能上传。
+- 错误不再包进返回结构：报错信息写到 stderr，退出码为 1；测试输入生成失败时，Polygon 返回的信息（包括出错的输入）会直接显示在错误里。
+- 旧工具对应的新命令：
+  - `get_problems` / `create_problem` / `get_problem_info` / `update_problem_info` → `problem list|create|info|update-info`
+  - `update_problem_working_copy` / `discard_problem_working_copy` / `commit_problem_changes` → `problem update-working-copy|discard-working-copy|commit`
+  - `get_problem_tags` / `save_problem_tags`、通用描述、通用题解 → `problem tags|set-tags|description|set-description|tutorial|set-tutorial`
+  - `get_problem_statements` / `save_problem_statement` / `*_statement_resource*` → `statement list|save|resources|upload-resource`
+  - `get_problem_files` / `view_problem_file` / `save_problem_file` → `file list|view|upload`
+  - `get_problem_solutions` / `view_problem_solution` / `save_problem_solution` / `edit_problem_solution_extra_tags` → `solution list|view|upload|extra-tag`
+  - validator、checker、interactor 的读取和设置，以及 validator/checker 测试 → `validator|checker|interactor show|set|tests|save-test`，额外 validator 用 `validator extra`
+  - 测试、脚本、测试组、计分相关工具 → `test list|input|answer|save|delete|script|save-script|groups|save-group|set-group|enable-groups|enable-points`
+  - `get_problem_packages` / `download_problem_package` / `build_problem_package` / `build_problem_package_and_wait` → `package list|download|build [--wait]`
+  - `check_problem_readiness` → `problem check`（检查项精简了，只输出 errors 和 warnings）
+  - `get_contest_problems` → `contest problems`
+  - 按 URL 下载的工具 → `download package|problem-xml|contest-xml|statements-pdf`；所有 `*_info` 元数据变体合并成 `-o FILE --json`，输出路径、大小和 sha256
+  - `prepare_problem_release` 删除，改为在 skill 里说明执行顺序：`problem check` → `problem commit` → `package build --wait`
+
+### Added
+
+- `problem cautions`：查看 Polygon 自带的 cautions 和 package 就绪问题（`problem.cautions`）。
+- `call`：直接调用任意 Polygon API 方法（`KEY=@path` 会上传文件内容）。
+- `test delete` 支持一次删除多个测试（`testIndices`）。
+
+### Removed
+
+- 设置 checker/validator/interactor 报错后再读回确认结果的逻辑。现在报错就直接失败，需要时可以用 `show` 自己确认。
+- 本地对测试脚本格式的预检查，现在交给 Polygon 校验。
+- 自动重试和指数退避。
 
 ## [0.13.0] - 2026-06-09
 

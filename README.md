@@ -1,274 +1,115 @@
-# CF-Polygon-MCP
+# cf-polygon
 
-基于 Codeforces Polygon API 的 MCP 工具集，提供一系列工具函数用于管理 Polygon 平台上的题目。
+[Codeforces Polygon](https://polygon.codeforces.com) API 的命令行客户端，主要给 agent 和脚本用，附带一个 agent skill。
 
-## 功能特性
+- 一个子命令基本对应一个 Polygon API 方法，另外有两个工作流：`problem check`（发布前自检）和 `package build --wait`（构建并等待结果）。
+- 加 `--json` 输出 JSON；出错时信息写到 stderr，退出码非零。
+- 每个命令都有 `--help`。
+- 配套 skill 在 [`skills/polygon/SKILL.md`](skills/polygon/SKILL.md)，写了 agent 在什么场景、按什么顺序调用这些命令。
 
-- 获取题目列表，支持多种筛选条件
-- 创建新的空题目
-- 获取题目详细信息（时限、内存限制等）
-- 获取题目描述、题解、输入输出格式等
-- 获取和保存题目陈述资源、源文件、辅助文件
-- 获取和保存测试脚本、测试点、validator/checker 测试、测试组，并支持删除测试点
-- 获取题目解决方案
-- 获取题目验证器、额外验证器、检查器、交互器，并支持设置验证器/检查器/交互器
-- 获取和保存题目标签、通用描述、通用题解
-- 获取历史包、下载包、构建包、提交工作副本
-- 提供出题流程辅助工具，包括 readiness 检查、打包等待和发布编排
-- 通过 Polygon 账号密码下载 problem package、problem.xml、contest.xml、statements.pdf
-- 获取比赛题目列表
-- 更新题目信息
-- 更新/丢弃工作副本
-- 更新题目描述
+> 1.0 之前这个项目是 MCP 服务（`cf-polygon-mcp` 0.x）。现在改成了 CLI，不再提供 MCP 接口，旧工具和新命令的对应关系见 [CHANGELOG](CHANGELOG.md)。
 
-## 配置
+## 安装
 
-向 mcp.json 中添加：
-```json
-"cf-polygon-mcp": {
-	"command": "uvx",
-	"args": ["cf-polygon-mcp"],
-	"env": {
-		"POLYGON_API_KEY": "your_key",
-		"POLYGON_API_SECRET": "your_secret",
-		"POLYGON_LOGIN": "your_login",
-		"POLYGON_PASSWORD": "your_password"
-	}
-}
+需要 Python 3.11+。
+
+```bash
+uv tool install git+https://github.com/gsh20040816/cf-polygon-mcp
+# 不安装、直接运行：
+uvx --from git+https://github.com/gsh20040816/cf-polygon-mcp cf-polygon --help
 ```
 
-在使用前，需要设置 Polygon API 密钥。可在 [Polygon 设置页面](https://polygon.codeforces.com/settings) 获取 API Key 和 Secret。
+## 凭证
 
-## 面向出题人的典型工作流
+| 环境变量 | 用途 |
+| --- | --- |
+| `POLYGON_API_KEY`、`POLYGON_API_SECRET` | 所有 API 命令。在 [Polygon 设置页](https://polygon.codeforces.com/settings) 生成 |
+| `POLYGON_LOGIN`、`POLYGON_PASSWORD` | 只有 `download` 组需要（按网页 URL 下载 package、problem.xml、contest.xml、statements.pdf），API key 不能代替 |
 
-大多数题目都可以按下面四段来推进：
+题目或比赛设置了 PIN 的话，加 `--pin`。
 
-1. 建题与元信息：先用 `create_problem` 创建空题，再用 `update_problem_info` 设置时限、内存、输入输出文件名，以及是否为交互题。
-2. 题面与素材：用 `save_problem_statement` 更新题面，用 `save_problem_statement_resource` 上传图片或附加素材，用 `save_problem_script`、`save_problem_test`、`delete_problem_test` 管理测试脚本和样例。
-3. 评测逻辑：用 `set_problem_validator`、`set_problem_checker`、`set_problem_interactor` 配置评测组件，再用 `save_problem_solution` 上传主解和错误解。
-4. 收口与发布：先跑 `check_problem_readiness`，再用 `build_problem_package_and_wait` 验证打包流程，最后用 `prepare_problem_release` 做完整发布编排。
+## 命令一览
 
-如果你只是做普通非交互题，最常用的一组工具通常是：
-
-- `create_problem`
-- `update_problem_info`
-- `save_problem_statement`
-- `save_problem_script`
-- `save_problem_test`
-- `delete_problem_test`
-- `set_problem_validator`
-- `save_problem_solution`
-- `check_problem_readiness`
-- `build_problem_package_and_wait`
-
-写操作和 workflow 工具都会返回结构化结果。最常见的固定字段是 `status`、`action`、`message`、`result`；workflow 结果还会补充 `stage`、`decision`、`can_retry`、`recovery_actions`。
-
-`save_problem_file` 的 `source_type` 是 Polygon 原始 `sourceType` 字符串，通常用于指定编译器/源文件类型，例如 `cpp.gcc14-64-msys2-g++23`。不要把它当成 validator/checker/main 角色；评测组件角色应通过 `set_problem_validator`、`set_problem_checker`、`set_problem_interactor` 绑定。
-
-## 二进制下载接口约定
-
-下载类工具现在统一分成两族：
-
-- 原始下载接口保持原名，直接返回 `bytes`，例如 `download_problem_package`、`download_problem_package_by_url`、`download_problem_descriptor`、`download_contest_descriptor`、`download_contest_statements_pdf`
-- 元数据接口统一使用 `_info` 后缀；如果原名以 `_by_url` 结尾，则在它前面插入 `_info`，例如 `download_problem_package_info`、`download_problem_package_info_by_url`、`download_problem_descriptor_info`
-
-`_info` 接口不会直接返回二进制内容，而是返回结构化元数据。固定字段是 `source_kind`、`source_ref`、`filename`、`content_kind`、`size_bytes`、`sha256`；如果来源本身是 URL，还会附带 `source_url`，而按 `problem_id/package_id` 下载的包会附带 `problem_id`、`package_id`、`package_type`。
-
-简单说：
-
-- 需要真正的文件内容时，用原始接口
-- 只想确认下载对象、文件类型、大小、哈希或给上层 agent 做分流时，用 `_info` 接口
-
-## 从新建题目到发布的完整链路示例
-
-下面示例按“普通非交互题”给出一条最短闭环。示例里的 `problem_id` 请替换成你自己的题目编号；如果你刚调用过 `create_problem`，后续一般直接取返回值里的 `problem.id` 即可。
-
-1. 创建空题：
-
-```json
-{
-  "name": "Array Rotation"
-}
+```text
+cf-polygon problem     list | create | info | update-info | check | cautions | commit
+                       | update-working-copy | discard-working-copy | tags | set-tags
+                       | description | set-description | tutorial | set-tutorial
+cf-polygon statement   list | save | resources | upload-resource
+cf-polygon file        list | view | upload
+cf-polygon solution    list | view | upload | extra-tag
+cf-polygon validator   show | set | extra | tests | save-test
+cf-polygon checker     show | set | tests | save-test
+cf-polygon interactor  show | set
+cf-polygon test        list | input | answer | save | delete | script | save-script
+                       | enable-groups | enable-points | groups | save-group | set-group
+cf-polygon package     list | build [--wait] | download
+cf-polygon contest     problems
+cf-polygon download    package | problem-xml | contest-xml | statements-pdf
+cf-polygon call        <method> key=value ...      # 直接调用任意 API 方法
 ```
 
-2. 设置题目基础信息：
+约定：
 
-```json
-{
-  "problem_id": 123456,
-  "input_file": "stdin",
-  "output_file": "stdout",
-  "time_limit": 2000,
-  "memory_limit": 256,
-  "interactive": false
-}
+- 输出：默认是文本，列表按 TSV 打印，对象按 `key: value` 打印。加 `--json` 输出完整 JSON；写操作如果 Polygon 没有返回内容，会打印 `{"ok": true}`。
+- 退出码：`0` 表示成功；`1` 表示 Polygon、网络或文件错误，错误信息在 stderr，带 `--json` 时是 `{"error": ...}`；`2` 表示参数用法不对。
+- 文本参数（help 里标成 `TEXT` 的）可以直接写字面量，也可以写 `@path` 读 UTF-8 文件，或者 `@-` 读 stdin。
+- 上传命令接受本地路径；用 `-` 从 stdin 读时需要同时给 `--name`。二进制文件（比如题面图片）也能上传。
+- 读文件内容的命令（`file view`、`solution view`、`test input`/`answer`/`script`、`package download`、`download *`）输出原始字节，可以用 `-o FILE` 写到文件。
+
+## 示例：从建题到打包
+
+```bash
+cf-polygon problem create array-rotation --json
+cf-polygon problem update-info 123456 --input-file stdin --output-file stdout --time-limit 2000 --memory-limit 256
+cf-polygon statement save 123456 --lang english --name "Array Rotation" --legend @legend.tex --input @input.tex --output @output.tex
+cf-polygon file upload 123456 validator.cpp
+cf-polygon validator set 123456 validator.cpp
+cf-polygon checker set 123456 std::wcmp.cpp
+cf-polygon file upload 123456 gen.cpp
+cf-polygon test save 123456 1 --input @sample1.txt --sample
+cf-polygon test save-script 123456 script.txt
+cf-polygon solution upload 123456 main.cpp --tag MA
+cf-polygon solution upload 123456 wrong.cpp --tag WA
+cf-polygon problem check 123456 --json
+cf-polygon problem commit 123456 -m "initial version"
+cf-polygon package build 123456 --wait --json
 ```
 
-3. 写英文题面：
+注意：Polygon 打包用的是**已提交**的 revision，工作副本里还有未提交修改时 build 会失败，所以要先 `problem commit` 再 `package build`。
 
-```json
-{
-  "problem_id": 123456,
-  "lang": "english",
-  "name": "Array Rotation",
-  "legend": "给定一个数组和若干操作，计算最终数组。",
-  "input": "第一行包含 n 和 q。",
-  "output": "输出最终数组。",
-  "notes": "样例中的数组下标从 1 开始。"
-}
-```
+交互题、计分和测试组、下载等更多工作流写在 [SKILL.md](skills/polygon/SKILL.md) 里。
 
-4. 上传测试脚本：
+## `problem check` 检查哪些内容
 
-```json
-{
-  "problem_id": 123456,
-  "testset": "tests",
-  "source": "gen 5 >$"
-}
-```
+`errors` 不为空时不应该打包，`warnings` 建议看一遍：
 
-5. 补一个样例测试：
+- **errors**：缺少输入/输出文件设置；没有题面，或题面缺少 name/legend/input/output；交互题缺 interaction 或 interactor；没有设置 validator；设置的 validator/checker/interactor/extra validator 不在源文件列表里；题面引用了不存在的资源；测试集为空；测试用到了未定义的测试组；测试组依赖了不存在的组，或者依赖成环；没有正确解。
+- **warnings**：没有英文题面；非交互题写了 interaction；没有设置 checker；没有样例；有计分但题面没写 scoring；生成测试和当前脚本对不上；主解（MA）不是正好一个；错误解不够或者只有一种；没有 validator/checker 测试；还没有 READY 的 package。
 
-```json
-{
-  "problem_id": 123456,
-  "testset": "tests",
-  "test_index": 1,
-  "test_input": "5 2\n1 2 3 4 5\n1 3\n2 5\n",
-  "test_use_in_statements": true,
-  "test_input_for_statements": "5 2\n1 2 3 4 5\n1 3\n2 5\n",
-  "test_output_for_statements": "3 4 5 1 2\n"
-}
-```
-
-6. 设置 validator，并上传主解和错误解：
-
-```json
-{
-  "problem_id": 123456,
-  "validator": "validator.cpp"
-}
-```
-
-```json
-{
-  "problem_id": 123456,
-  "name": "main.cpp",
-  "local_path": "/path/to/main.cpp",
-  "tag": "MA"
-}
-```
-
-```json
-{
-  "problem_id": 123456,
-  "name": "wrong.cpp",
-  "local_path": "/path/to/wrong.cpp",
-  "tag": "WA"
-}
-```
-
-7. 运行 readiness 检查：
-
-```json
-{
-  "problem_id": 123456,
-  "testset": "tests"
-}
-```
-
-重点看返回值中的 `blocking_issues`、`warnings` 和 `details`。如果 `status` 不是成功，或者 `blocking_issues` 非空，先修题再继续。
-
-8. 触发打包并等待结果：
-
-```json
-{
-  "problem_id": 123456,
-  "full": true,
-  "verify": true,
-  "timeout_seconds": 1800,
-  "poll_interval_seconds": 5.0
-}
-```
-
-9. 最后执行统一发布流程：
-
-```json
-{
-  "problem_id": 123456,
-  "testset": "tests",
-  "full": true,
-  "verify": true,
-  "message": "prepare release",
-  "minor_changes": true
-}
-```
-
-如果你只是想单独检查 readiness 或构建，不一定要直接调用 `prepare_problem_release`。这个 workflow 会按 Polygon 要求先提交工作副本再构建，更适合“准备发布前做一次全链路收口”。
-
-## 交互题、带分题与测试组题目的常见操作
-
-- 交互题：先用 `update_problem_info(problem_id=..., interactive=true)` 打开交互模式，再调用 `set_problem_interactor`、`set_problem_checker`，并在 `save_problem_statement` 里填写 `interaction` 字段。最后用 `check_problem_readiness` 检查 `interactive`、`interactor`、`checker` 和题面 `interaction` 是否一致。
-- 带分题：先用 `enable_problem_points(problem_id=..., enable=true)` 打开点数模式，再在 `save_problem_test` 中填写 `test_points`，同时在 `save_problem_statement` 里补 `scoring`。如果只开了点数模式却没写评分说明，`check_problem_readiness` 会给出告警。
-- 测试组题：先用 `enable_problem_groups(problem_id=..., testset="tests", enable=true)`，再用 `save_problem_test_group` 配置组，例如 `points_policy="COMPLETE_GROUP"`、`feedback_policy="ICPC"`，之后用 `set_problem_test_group` 绑定测试。若测试组依赖成环，`check_problem_readiness` 会直接报出 cycle。
-- 错误解覆盖：建议至少上传一个主解和若干典型错误解，用 `save_problem_solution` 设置 `tag="MA"`、`tag="WA"`、`tag="TL"` 等；如果还需要把错误解绑定到某个测试组，可以再调用 `edit_problem_solution_extra_tags`。
-
-## 错误排查
-
-- 缺少 API 凭证：大多数工具依赖 `POLYGON_API_KEY` 和 `POLYGON_API_SECRET`；下载 problem package、problem.xml、contest.xml、statements.pdf 这类工具走 Polygon 网页下载流程，还需要 `POLYGON_LOGIN` 和 `POLYGON_PASSWORD`，不能用 API key/secret 替代。
-- `check_problem_readiness` 未通过：先看 `blocking_issues` 和 `warnings`，再看 `details` 中是哪一节失败。这个工具已经会检查题面资源缺失、交互题配置不一致、测试组依赖成环、评分说明缺失、样例缺失、主解/错误解覆盖不足、generator 与脚本漂移等问题。
-- `build_problem_package_and_wait` 失败或超时：优先看 `stage`、`decision`、`failure_reason`、`package`、`package_history`。如果 `can_retry=true`，通常可以直接使用返回值里的 `recovery_actions` 选择下一步。
-- `prepare_problem_release` 被拦下：常见的 `decision` 包括 `update_failed`、`blocking_issues`、`warnings_not_allowed`、`build_failed`、`commit_failed`。这几个分支都会给出 `recovery_actions`，可以按建议先单独修复，再重试完整 workflow。
-- `view_problem_test_input` 失败：生成测试或 validator 崩溃时，工具会返回结构化错误对象；优先看 `failure_comment`，如果 Polygon 返回了输入内容，`partial_input` 会尽量保留。
-- 样例或资源对不上：如果题面里引用了图片、代码片段或外部资源，但 `save_problem_statement_resource` 没有上传对应文件，readiness 会直接指出缺失文件名。
-- 测试脚本和生成器不一致：如果脚本里引用了不存在的生成器文件，或者测试上的 `scriptLine` 已经和当前脚本漂移，readiness 会在 `details` 里标出来。
+调用 API 本身失败时，命令直接报错退出，不会把失败混进检查结果。Polygon 自带的检查结果用 `problem cautions` 查看。
 
 ## 开发
 
-1. 确保你已经安装了 Python 3.11 及以上版本。
-2. 克隆项目：
 ```bash
 git clone https://github.com/gsh20040816/cf-polygon-mcp.git
 cd cf-polygon-mcp
-```
-
-3. 安装依赖：
-```bash
 uv sync
+uv run cf-polygon --help
+uv run python -m unittest discover -s tests -v
 ```
 
-4. 运行项目：
-```bash
-uv run mcp dev main.py
-```
+代码结构：
 
-5. 运行测试：
-```bash
-python -m unittest discover -s tests -v
-```
+- `src/cf_polygon/client.py`：`Polygon.call(method, **params)`，负责 apiSig 签名和 multipart POST，失败时抛 `PolygonError`；另有走网页登录的 `download()`。
+- `src/cf_polygon/cli.py`：argparse 命令定义，每个命令就是一次 `call`。
+- `src/cf_polygon/workflow.py`：`check_problem` 和 `build_package_and_wait`。
 
-## GitHub 自动发版
+测试全部 mock HTTP，不会访问真实的 Polygon。
 
-仓库包含两个 GitHub Actions 工作流：
+## 发版
 
-- [ci.yml](.github/workflows/ci.yml)：在 `push` 到 `main` 或收到 `pull_request` 时运行，使用 Python 3.11 安装依赖、执行 `python -m unittest discover -s tests -v`，并构建 `sdist` 和 `wheel`
-- [publish.yml](.github/workflows/publish.yml)：仅在推送版本 tag（如 `v0.13.0`）时运行，会重新执行测试与构建，校验 tag 与 `pyproject.toml` 中的版本一致，要求 [CHANGELOG.md](CHANGELOG.md) 中存在该版本的发布记录，并在该版本尚未发布到 PyPI 时上传发行包
-
-推荐的发布流程：
-
-1. 更新 [pyproject.toml](pyproject.toml) 中的版本号，并在 [CHANGELOG.md](CHANGELOG.md) 中补上该版本的发布记录
-2. 等待 [ci.yml](.github/workflows/ci.yml) 通过
-3. 创建并推送对应版本 tag，例如 `git tag v0.13.0 && git push origin v0.13.0`
-
-建议把 changelog 直接当作 release notes 的单一来源：每次发布至少记录新增工具、修复问题和兼容性变更。`publish.yml` 会在发版前检查 `CHANGELOG.md` 是否包含当前版本条目，避免漏写发布说明。
-
-要让自动发布生效，需要先在 PyPI 的 Trusted Publisher 中添加这个 GitHub 仓库：
-
-- Owner: `gsh20040816`
-- Repository name: `cf-polygon-mcp`
-- Workflow name: `publish.yml`
-- Environment name: `pypi`
+- [ci.yml](.github/workflows/ci.yml)：push 到 `main` 或者有 PR 时运行，跑测试并构建 sdist/wheel。
+- [publish.yml](.github/workflows/publish.yml)：推送 `v*` tag 时运行，检查 tag 和 `pyproject.toml` 里的版本号一致、[CHANGELOG.md](CHANGELOG.md) 里有这个版本的条目，然后通过 Trusted Publisher 发布到 PyPI。
 
 ## 许可证
 
