@@ -366,6 +366,24 @@ class CommandMappingTest(unittest.TestCase):
         self.assertEqual(r.code, 1)
         self.assertIn("Conflict in statements", r.stderr)
 
+    def test_problem_check_exits_1_when_not_ready(self):
+        ready = {"problem_id": 9, "ready": True, "errors": [], "warnings": ["no READY package yet"]}
+        not_ready = {"problem_id": 9, "ready": False, "errors": ["no statement"], "warnings": []}
+        with patch("codeforces_polygon.cli.workflow.check_problem", return_value=ready) as check:
+            r = Run(["problem", "check", "9", "--json"])
+        self.assertEqual((r.code, json.loads(r.out), r.stderr), (0, ready, ""))
+        self.assertEqual(check.call_args.args[1:], (9, None, "tests"))
+        with patch("codeforces_polygon.cli.workflow.check_problem", return_value=not_ready):
+            r = Run(["problem", "check", "9", "--json"])
+        self.assertEqual(r.code, 1)
+        self.assertEqual(json.loads(r.out), not_ready)
+        self.assertIn("1 error(s)", r.stderr)
+        with patch("codeforces_polygon.cli.workflow.check_problem", return_value=not_ready):
+            r = Run(["problem", "check", "9"])
+        self.assertEqual(r.code, 1)
+        self.assertIn("ready: False", r.out)
+        self.assertIn("no statement", r.out)
+
     def test_commit_without_changes_is_ok(self):
         r = Run(["problem", "commit", "9", "--json"], result={"committed": False, "conflictOccurred": False,
                                                               "message": "No changes"})

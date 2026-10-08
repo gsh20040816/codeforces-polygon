@@ -48,6 +48,7 @@
 - `package build --wait` 轮询时遇到网络错误或 5xx 会继续等，不会让调用方以为失败而重复构建；超时提示里写明构建已开始，应该用 `package list` 查看。
 - 同一条命令里第二次读 stdin（`-`）会报错，不再读到空串把题面清空。
 - stdout/stderr 不是 UTF-8 时输出俄文或中文不再抛 traceback。
+- `problem check`：`errors` 不为空时退出码为 1（`--json` 时完整结果仍写到 stdout）；只有 `warnings` 时仍是 0。之前检查跑完就返回 0，需要自己读 `ready`。
 - `problem check` 不再把每个生成测试都报成“和当前脚本对不上”（Polygon 的 `scriptLine` 不带 `> 目标`）。
 - `download` 组的 URL 示例改成和官方文档一致的格式。
 

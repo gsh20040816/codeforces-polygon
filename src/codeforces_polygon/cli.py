@@ -208,7 +208,11 @@ def problem_update_info(a):
 
 
 def problem_check(a):
-    return workflow.check_problem(api(), a.problem_id, a.pin, a.testset)
+    result = workflow.check_problem(api(), a.problem_id, a.pin, a.testset)
+    if not result["ready"]:
+        # warnings alone keep exit 0: they are advice, not a blocked release
+        raise Unfinished(f"problem check: {len(result['errors'])} error(s)", result)
+    return result
 
 
 def problem_cautions(a):
@@ -659,7 +663,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--interactive", action=argparse.BooleanOptionalAction, default=None)
     p = _leaf(g, "check", problem_check,
               "Local readiness heuristics: print errors (must fix) and warnings before building a package. "
-              "Exit status is 0 whenever the check ran; read `ready` and `errors`")
+              "Exit 1 when `errors` is non-empty (`ready` is false); warnings alone keep exit 0")
     _testset(p)
     _leaf(g, "cautions", problem_cautions,
           "Polygon's own cautions and package-readiness issues for the working copy")

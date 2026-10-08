@@ -29,7 +29,7 @@ polygonctl test save --help
   Write commands print `{"ok": true}` with `--json` when Polygon returns nothing.
 - stdout carries only the result; errors go to stderr (`{"error": ...}` with `--json`).
 - Exit status: `0` success; `1` the command failed (Polygon or network error, a failed `push` step, a
-  failed render); `2` bad usage (unknown option, missing or unreadable file named on the command
+  failed render, a `problem check` that found errors — the result is still printed to stdout); `2` bad usage (unknown option, missing or unreadable file named on the command
   line, stdin used twice, missing `--yes`). Check the exit status, never parse prose.
 - A text option `--X TEXT` takes the text literally (an `@` is just a character). Its twin
   `--X-file PATH` reads a UTF-8 file sent byte for byte; `PATH` `-` reads stdin (once per command).
@@ -99,7 +99,7 @@ polyman generate --all && polyman validate --all
 polyman verify --json > verify.json                   # gate: exit 0 and "failedStep": null
 polygonctl push . --dry-run                           # what would change on Polygon
 polygonctl push . --json                              # first run creates the problem, writes problemId
-polygonctl problem check 123456 --json                # "errors" must be empty
+polygonctl problem check 123456 --json                # exit 0 only when "errors" is empty
 polygonctl problem cautions 123456 --json
 polygonctl problem commit 123456 -m "initial version"
 polygonctl package build 123456 --wait --json
@@ -169,7 +169,7 @@ polygonctl test script 123456
 polygonctl validator show 123456
 polygonctl checker show 123456
 polygonctl file view 123456 gen.cpp -o gen.cpp
-polygonctl problem check 123456 --json           # errors + warnings (computed locally)
+polygonctl problem check 123456 --json           # exit 1 if "errors" is non-empty; warnings alone keep 0
 polygonctl problem cautions 123456 --json        # Polygon's own cautions / package-readiness issues
 polygonctl issue list 123456 --open --json       # reviewers' open issues
 ```
@@ -191,7 +191,7 @@ polygonctl solution upload 123456 main.cpp --tag MA
 polygonctl solution upload 123456 brute.cpp --tag TL
 polygonctl solution upload 123456 wrong.cpp --tag WA
 polygonctl validator save-test 123456 1 --input "0" --verdict INVALID
-polygonctl problem check 123456 --json           # fix every entry in "errors"
+polygonctl problem check 123456 --json           # exit 1 until every entry in "errors" is fixed
 polygonctl problem commit 123456 -m "initial version"
 polygonctl package build 123456 --wait --json    # READY → exit 0, FAILED → exit 1 with the reason
 ```
